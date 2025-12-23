@@ -314,7 +314,7 @@ export default function WeightWiseTracker() {
             transition={{ delay: 0.2 }}
             className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400 mb-4"
           >
-            WeightWise Pro
+            Weight Tracking App
           </motion.h1>
 
           <motion.p
@@ -515,7 +515,7 @@ export default function WeightWiseTracker() {
               </div>
               <div>
                 <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
-                  WeightWise Pro
+                  Weight Tracking App
                 </h1>
                 <p className="text-xs text-gray-400">Smart Weight Tracker</p>
               </div>

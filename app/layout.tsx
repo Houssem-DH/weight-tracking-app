@@ -8,7 +8,7 @@ import { Toaster } from "@/components/ui/sonner";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "WeightSync Pro", // Changed app name
+  title: "Weight Tracking App", // Changed app name
   description: "Ultra-modern weight tracking application",
 };
 
