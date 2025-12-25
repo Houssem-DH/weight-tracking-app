@@ -1,7 +1,8 @@
+// app/page.tsx
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { format, parseISO, differenceInDays } from "date-fns";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { format, parseISO, differenceInDays, startOfDay } from "date-fns";
 import {
   AreaChart,
   Area,
@@ -48,19 +49,56 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Slider } from "@/components/ui/slider";
 
+// ==================== HELPER FUNCTIONS ====================
+// PostgreSQL DECIMAL/NUMERIC types come as strings, so we need to convert them
+const safeToNumber = (value: any): number => {
+  if (value === null || value === undefined) return 0;
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  return isNaN(num) ? 0 : num;
+};
+
+const safeToFixed = (value: any, decimals: number = 1): string => {
+  const num = safeToNumber(value);
+  return num.toFixed(decimals);
+};
+// ==========================================================
+
+// Updated types to match database schema
 type WeightEntry = {
-  id: string;
+  id: number;
+  user_id: number;
   date: string;
   weight: number;
   note?: string;
+  created_at: string;
 };
 
 type UserProfile = {
+  id: number;
   name: string;
-  startWeight: number;
-  goalWeight: number | null;
-  startDate: string;
-  targetDate?: string;
+  start_weight: number;
+  goal_weight: number | null;
+  start_date: string;
+  target_date: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// Helper function for API calls
+const apiCall = async (endpoint: string, options: RequestInit = {}) => {
+  const response = await fetch(`/api/${endpoint}`, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    ...options,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || 'API request failed');
+  }
+
+  return response.json();
 };
 
 export default function WeightWiseTracker() {
@@ -73,8 +111,21 @@ export default function WeightWiseTracker() {
   const [setupTargetWeeks, setSetupTargetWeeks] = useState(12);
   const [todaysWeight, setTodaysWeight] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+  const [hasLoadedFromStorage, setHasLoadedFromStorage] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Load userId from localStorage ONLY on client side
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedId = localStorage.getItem('weightApp_userId');
+      if (savedId) {
+        setCurrentUserId(parseInt(savedId));
+      }
+      setHasLoadedFromStorage(true);
+    }
+  }, []);
 
   // Focus on weight input when dashboard loads
   useEffect(() => {
@@ -85,31 +136,54 @@ export default function WeightWiseTracker() {
     }
   }, [userProfile]);
 
+  // Load data from database
   useEffect(() => {
-    const loadSavedData = () => {
+    const loadSavedData = async () => {
+      // Only run if we've checked localStorage and have a userId
+      if (!hasLoadedFromStorage) return;
+      
       try {
-        const savedUser = localStorage.getItem("weightApp_user");
-        const savedEntries = localStorage.getItem("weightApp_entries");
-
-        if (savedUser) {
-          setUserProfile(JSON.parse(savedUser));
-        }
-        if (savedEntries) {
-          setWeightEntries(JSON.parse(savedEntries));
+        if (currentUserId) {
+          // Load user profile
+          const user = await apiCall(`user?id=${currentUserId}`);
+          // Convert string numbers to actual numbers
+          const processedUser = {
+            ...user,
+            start_weight: safeToNumber(user.start_weight),
+            goal_weight: user.goal_weight ? safeToNumber(user.goal_weight) : null
+          };
+          setUserProfile(processedUser);
+          
+          // Load weight entries
+          const entries = await apiCall(`entries?userId=${currentUserId}`);
+          // Convert all weight strings to numbers
+          const processedEntries = entries.map((entry: any) => ({
+            ...entry,
+            weight: safeToNumber(entry.weight)
+          }));
+          setWeightEntries(processedEntries);
         }
       } catch (error) {
         console.error("Failed to load data:", error);
+        // If user doesn't exist or error, clear localStorage
+        if (error instanceof Error && error.message.includes('not found')) {
+          localStorage.removeItem('weightApp_userId');
+          setCurrentUserId(null);
+        }
         toast.error("Could not load your saved data.");
       } finally {
         setIsLoading(false);
       }
     };
 
-    // Simulate loading for better UX
-    setTimeout(loadSavedData, 800);
-  }, []);
+    // Wait for localStorage check before loading
+    if (hasLoadedFromStorage) {
+      // Simulate loading for better UX
+      setTimeout(loadSavedData, 800);
+    }
+  }, [currentUserId, hasLoadedFromStorage]);
 
-  const handleSetupSubmit = (e: React.FormEvent) => {
+  const handleSetupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
 
@@ -119,47 +193,67 @@ export default function WeightWiseTracker() {
       return;
     }
 
-    setTimeout(() => {
+    try {
       const currentWeightNum = parseFloat(setupCurrentWeight);
-      const goalWeightNum = setupGoalWeight
-        ? parseFloat(setupGoalWeight)
-        : null;
+      const goalWeightNum = setupGoalWeight ? parseFloat(setupGoalWeight) : null;
 
       const targetDate = new Date();
       targetDate.setDate(targetDate.getDate() + setupTargetWeeks * 7);
 
-      const newUserProfile: UserProfile = {
-        name: setupName.trim(),
-        startWeight: currentWeightNum,
-        goalWeight: goalWeightNum,
-        startDate: new Date().toISOString(),
-        targetDate: targetDate.toISOString(),
+      // Create user in database
+      const newUser = await apiCall('user', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: setupName.trim(),
+          startWeight: currentWeightNum,
+          goalWeight: goalWeightNum,
+          targetDate: targetDate.toISOString(),
+        }),
+      });
+
+      // Process the returned user to ensure numbers
+      const processedUser = {
+        ...newUser,
+        start_weight: safeToNumber(newUser.start_weight),
+        goal_weight: newUser.goal_weight ? safeToNumber(newUser.goal_weight) : null
       };
 
-      const initialWeightEntry: WeightEntry = {
-        id: Date.now().toString(),
-        date: new Date().toISOString(),
-        weight: currentWeightNum,
-        note: "Starting point",
+      // Save user ID to localStorage for persistence
+      localStorage.setItem('weightApp_userId', newUser.id.toString());
+      setCurrentUserId(newUser.id);
+      setHasLoadedFromStorage(true);
+
+      // Create initial weight entry
+      const initialEntry = await apiCall('entries', {
+        method: 'POST',
+        body: JSON.stringify({
+          userId: newUser.id,
+          weight: currentWeightNum,
+          note: "Starting point",
+        }),
+      });
+
+      // Process the returned entry to ensure numbers
+      const processedEntry = {
+        ...initialEntry,
+        weight: safeToNumber(initialEntry.weight)
       };
 
-      setUserProfile(newUserProfile);
-      setWeightEntries([initialWeightEntry]);
-
-      localStorage.setItem("weightApp_user", JSON.stringify(newUserProfile));
-      localStorage.setItem(
-        "weightApp_entries",
-        JSON.stringify([initialWeightEntry])
-      );
+      setUserProfile(processedUser);
+      setWeightEntries([processedEntry]);
 
       toast.success(`Welcome to your journey, ${setupName.trim()}! 🚀`, {
-        description: "Let's crush those goals together.",
+        description: "Your data is now securely stored in the cloud.",
       });
+    } catch (error) {
+      console.error('Setup failed:', error);
+      toast.error(error instanceof Error ? error.message : "Failed to create your profile. Please try again.");
+    } finally {
       setIsSubmitting(false);
-    }, 600);
+    }
   };
 
-  const handleAddTodaysWeight = (e: React.FormEvent) => {
+  const handleAddTodaysWeight = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!todaysWeight || !userProfile) {
@@ -168,63 +262,103 @@ export default function WeightWiseTracker() {
     }
 
     const todaysWeightNum = parseFloat(todaysWeight);
-    const newEntry: WeightEntry = {
-      id: Date.now().toString(),
-      date: new Date().toISOString(),
-      weight: todaysWeightNum,
-    };
+    
+    try {
+      // Check if entry already exists for today
+      const today = startOfDay(new Date()).toISOString();
+      const hasEntryToday = weightEntries.some(entry => 
+        startOfDay(new Date(entry.date)).toISOString() === today
+      );
 
-    const updatedEntries = [...weightEntries, newEntry];
-    setWeightEntries(updatedEntries);
-    localStorage.setItem("weightApp_entries", JSON.stringify(updatedEntries));
-
-    // Animate success
-    setTodaysWeight("");
-
-    if (weightEntries.length > 0) {
-      const lastWeight = weightEntries[weightEntries.length - 1].weight;
-      const difference = todaysWeightNum - lastWeight;
-
-      if (difference < 0) {
-        toast.success(`Amazing progress! 🔥`, {
-          description: `Down ${Math.abs(difference).toFixed(
-            1
-          )}kg from last time!`,
+      if (hasEntryToday) {
+        toast.info("You've already logged your weight today!", {
+          description: "You can update it tomorrow.",
         });
-      } else if (difference > 0) {
-        toast.info("Weight recorded 📝", {
-          description: `Stay consistent, you've got this!`,
-        });
-      } else {
-        toast.success("Weight maintained! ⚖️");
+        return;
       }
-    } else {
-      toast.success("First entry recorded! 🎯");
+
+      // Create new entry in database
+      const newEntry = await apiCall('entries', {
+        method: 'POST',
+        body: JSON.stringify({
+          userId: userProfile.id,
+          weight: todaysWeightNum,
+          note: "Daily entry",
+        }),
+      });
+
+      // Process the returned entry to ensure numbers
+      const processedEntry = {
+        ...newEntry,
+        weight: safeToNumber(newEntry.weight)
+      };
+
+      const updatedEntries = [processedEntry, ...weightEntries];
+      setWeightEntries(updatedEntries);
+      setTodaysWeight("");
+
+      // Show appropriate toast message
+      if (weightEntries.length > 0) {
+        const lastWeight = weightEntries[0].weight;
+        const difference = todaysWeightNum - lastWeight;
+
+        if (difference < 0) {
+          toast.success(`Amazing progress! 🔥`, {
+            description: `Down ${Math.abs(difference).toFixed(1)}kg from last time!`,
+          });
+        } else if (difference > 0) {
+          toast.info("Weight recorded 📝", {
+            description: `Stay consistent, you've got this!`,
+          });
+        } else {
+          toast.success("Weight maintained! ⚖️");
+        }
+      } else {
+        toast.success("First entry recorded! 🎯");
+      }
+    } catch (error) {
+      console.error('Failed to save entry:', error);
+      toast.error(error instanceof Error ? error.message : "Failed to save your weight entry.");
     }
   };
 
-  const handleResetData = () => {
+  const handleResetData = async () => {
+    if (!userProfile) return;
+
     toast("Starting fresh?", {
-      description: "This will delete all your data.",
+      description: "This will delete all your data from the cloud.",
       action: {
         label: "Reset",
-        onClick: () => {
-          localStorage.removeItem("weightApp_user");
-          localStorage.removeItem("weightApp_entries");
-          setUserProfile(null);
-          setWeightEntries([]);
-          setTodaysWeight("");
-          toast.success("Clean slate! ✨");
+        onClick: async () => {
+          try {
+            // Delete user (which cascades to entries)
+            await apiCall(`user?id=${userProfile.id}`, {
+              method: 'DELETE',
+            });
+
+            // Clear local state
+            localStorage.removeItem('weightApp_userId');
+            setUserProfile(null);
+            setWeightEntries([]);
+            setTodaysWeight("");
+            setCurrentUserId(null);
+            setHasLoadedFromStorage(true);
+
+            toast.success("All data deleted successfully! ✨");
+          } catch (error) {
+            console.error('Reset failed:', error);
+            toast.error("Failed to reset data. Please try again.");
+          }
         },
       },
     });
   };
 
-  const calculateStats = () => {
-    if (weightEntries.length === 0) return null;
+  const calculateStats = useCallback(() => {
+    if (weightEntries.length === 0 || !userProfile) return null;
 
-    const latest = weightEntries[weightEntries.length - 1];
-    const first = weightEntries[0];
+    const latest = weightEntries[0];
+    const first = weightEntries[weightEntries.length - 1];
     const totalChange = latest.weight - first.weight;
     const daysTracked =
       differenceInDays(new Date(latest.date), new Date(first.date)) || 1;
@@ -233,8 +367,8 @@ export default function WeightWiseTracker() {
 
     // Calculate progress towards goal
     let goalProgress = 0;
-    if (userProfile?.goalWeight && totalChange < 0) {
-      const totalToLose = userProfile.startWeight - userProfile.goalWeight;
+    if (userProfile.goal_weight && totalChange < 0) {
+      const totalToLose = userProfile.start_weight - userProfile.goal_weight;
       const lostSoFar = Math.abs(totalChange);
       goalProgress = Math.min(100, (lostSoFar / totalToLose) * 100);
     }
@@ -247,30 +381,26 @@ export default function WeightWiseTracker() {
       goalProgress,
       streak: calculateStreak(),
     };
-  };
+  }, [weightEntries, userProfile]);
 
-  const calculateStreak = () => {
+  const calculateStreak = useCallback(() => {
     if (weightEntries.length < 2) return 1;
 
     let streak = 1;
-    const sortedEntries = [...weightEntries].sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-    );
-
-    for (let i = 1; i < sortedEntries.length; i++) {
-      const prevDate = new Date(sortedEntries[i - 1].date);
-      const currDate = new Date(sortedEntries[i].date);
-      const diffDays = differenceInDays(prevDate, currDate);
+    for (let i = 0; i < weightEntries.length - 1; i++) {
+      const currentDate = startOfDay(new Date(weightEntries[i].date));
+      const nextDate = startOfDay(new Date(weightEntries[i + 1].date));
+      const diffDays = Math.abs(differenceInDays(currentDate, nextDate));
 
       if (diffDays === 1) streak++;
       else break;
     }
 
     return streak;
-  };
+  }, [weightEntries]);
 
   const stats = calculateStats();
-  const chartData = weightEntries.map((entry) => ({
+  const chartData = [...weightEntries].reverse().map((entry) => ({
     ...entry,
     displayDate: format(parseISO(entry.date), "MMM dd"),
   }));
@@ -314,7 +444,7 @@ export default function WeightWiseTracker() {
             transition={{ delay: 0.2 }}
             className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400 mb-4"
           >
-            Weight Tracking App
+            WeightWise Pro
           </motion.h1>
 
           <motion.p
@@ -377,7 +507,7 @@ export default function WeightWiseTracker() {
               Begin Your Journey
             </CardTitle>
             <CardDescription className="text-lg text-gray-300">
-              Let's create your personalized weight transformation plan
+              Your data will be securely stored in the cloud
             </CardDescription>
           </CardHeader>
 
@@ -412,6 +542,8 @@ export default function WeightWiseTracker() {
                       placeholder="e.g., 75.5"
                       className="h-14 bg-gray-800/50 border-gray-700 text-lg backdrop-blur-sm"
                       required
+                      min="30"
+                      max="300"
                     />
                   </div>
                 </div>
@@ -429,6 +561,8 @@ export default function WeightWiseTracker() {
                       onChange={(e) => setSetupGoalWeight(e.target.value)}
                       placeholder="e.g., 70.0"
                       className="h-14 bg-gray-800/50 border-gray-700 text-lg backdrop-blur-sm"
+                      min="30"
+                      max="300"
                     />
                   </div>
 
@@ -469,7 +603,7 @@ export default function WeightWiseTracker() {
                   {isSubmitting ? (
                     <>
                       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                      Creating Your Space...
+                      Creating Your Profile...
                     </>
                   ) : (
                     <>
@@ -515,13 +649,17 @@ export default function WeightWiseTracker() {
               </div>
               <div>
                 <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
-                  Weight Tracking App
+                  WeightWise Pro
                 </h1>
-                <p className="text-xs text-gray-400">Smart Weight Tracker</p>
+                <p className="text-xs text-gray-400">Cloud Sync Enabled</p>
               </div>
             </div>
 
             <div className="flex items-center gap-4">
+              <Badge className="bg-gradient-to-r from-green-500/20 to-green-600/20 text-green-300 border-green-500/30">
+                <Sparkles className="mr-2 h-3 w-3" />
+                Cloud Storage
+              </Badge>
               <div className="flex items-center gap-3 px-4 py-2 rounded-full bg-gray-800/50 backdrop-blur-sm border border-white/10">
                 <Avatar className="h-8 w-8">
                   <AvatarFallback className="bg-gradient-to-r from-purple-500 to-blue-500">
@@ -531,7 +669,8 @@ export default function WeightWiseTracker() {
                 <div>
                   <p className="text-sm font-medium">{userProfile.name}</p>
                   <p className="text-xs text-gray-400">
-                    {stats?.currentWeight?.toFixed(1)} kg
+                    {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                    {stats?.currentWeight !== undefined ? safeToFixed(stats.currentWeight, 1) : "0.0"} kg
                   </p>
                 </div>
               </div>
@@ -574,7 +713,7 @@ export default function WeightWiseTracker() {
                         className="border-gray-700 text-gray-400 hover:text-white"
                       >
                         <RotateCw className="mr-2 h-4 w-4" />
-                        Reset
+                        Reset All
                       </Button>
                     </div>
                   </div>
@@ -600,7 +739,8 @@ export default function WeightWiseTracker() {
                       </Badge>
                     </div>
                     <p className="text-3xl font-bold">
-                      {stats?.currentWeight?.toFixed(1)} kg
+                      {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                      {stats?.currentWeight !== undefined ? safeToFixed(stats.currentWeight, 1) : "0.0"} kg
                     </p>
                     <p className="text-sm text-gray-400 mt-2">Today's weight</p>
                   </CardContent>
@@ -631,7 +771,8 @@ export default function WeightWiseTracker() {
                       }`}
                     >
                       {stats?.totalChange && stats.totalChange > 0 ? "+" : ""}
-                      {stats?.totalChange?.toFixed(1)} kg
+                      {/* FIXED: Using safeToFixed for totalChange */}
+                      {stats?.totalChange !== undefined ? safeToFixed(stats.totalChange, 1) : "0.0"} kg
                     </p>
                     <p className="text-sm text-gray-400 mt-2">Total progress</p>
                   </CardContent>
@@ -655,7 +796,8 @@ export default function WeightWiseTracker() {
                       </Badge>
                     </div>
                     <p className="text-3xl font-bold">
-                      {stats?.changePerWeek?.toFixed(2)} kg
+                      {/* FIXED: Using safeToFixed for changePerWeek */}
+                      {stats?.changePerWeek !== undefined ? safeToFixed(stats.changePerWeek, 2) : "0.00"} kg
                     </p>
                     <p className="text-sm text-gray-400 mt-2">Per week</p>
                   </CardContent>
@@ -679,10 +821,11 @@ export default function WeightWiseTracker() {
                       </Badge>
                     </div>
                     <p className="text-3xl font-bold">
-                      {stats?.goalProgress?.toFixed(0)}%
+                      {/* FIXED: Using safeToFixed for goalProgress */}
+                      {stats?.goalProgress !== undefined ? safeToFixed(stats.goalProgress, 0) : "0"}%
                     </p>
                     <div className="mt-2">
-                      <Progress value={stats?.goalProgress} className="h-2" />
+                      <Progress value={stats?.goalProgress || 0} className="h-2" />
                     </div>
                   </CardContent>
                 </Card>
@@ -703,7 +846,7 @@ export default function WeightWiseTracker() {
                     <span>Log Today's Weight</span>
                   </CardTitle>
                   <CardDescription>
-                    Stay consistent with your daily tracking
+                    Your data syncs automatically to the cloud
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -720,6 +863,8 @@ export default function WeightWiseTracker() {
                             placeholder="Enter today's weight in kg"
                             className="h-16 text-2xl text-center bg-gray-800/50 border-gray-700 backdrop-blur-sm"
                             required
+                            min="30"
+                            max="300"
                           />
                           <div className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400">
                             kg
@@ -735,7 +880,7 @@ export default function WeightWiseTracker() {
                           className="h-16 px-8 text-lg bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 border-0"
                         >
                           <Zap className="mr-2 h-5 w-5" />
-                          Add Entry
+                          Save to Cloud
                         </Button>
                       </motion.div>
                     </div>
@@ -809,6 +954,7 @@ export default function WeightWiseTracker() {
                               backdropFilter: "blur(10px)",
                             }}
                             formatter={(value) => [`${value} kg`, "Weight"]}
+                            labelFormatter={(label) => `Date: ${label}`}
                           />
                           <Area
                             type="monotone"
@@ -866,7 +1012,7 @@ export default function WeightWiseTracker() {
                       </h3>
                       <p className="text-sm text-gray-400">
                         Since{" "}
-                        {format(parseISO(userProfile.startDate), "MMM d, yyyy")}
+                        {format(parseISO(userProfile.start_date), "MMM d, yyyy")}
                       </p>
                     </div>
                   </div>
@@ -875,27 +1021,36 @@ export default function WeightWiseTracker() {
                     <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
                       <span className="text-gray-400">Start Weight</span>
                       <span className="font-semibold">
-                        {userProfile.startWeight.toFixed(1)} kg
+                        {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                        {safeToFixed(userProfile.start_weight, 1)} kg
                       </span>
                     </div>
 
-                    {userProfile.goalWeight && (
+                    {userProfile.goal_weight && (
                       <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
                         <span className="text-gray-400">Goal Weight</span>
                         <span className="font-semibold text-green-400">
-                          {userProfile.goalWeight.toFixed(1)} kg
+                          {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                          {safeToFixed(userProfile.goal_weight, 1)} kg
                         </span>
                       </div>
                     )}
 
-                    {userProfile.targetDate && (
+                    {userProfile.target_date && (
                       <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
                         <span className="text-gray-400">Target Date</span>
                         <span className="font-semibold">
-                          {format(parseISO(userProfile.targetDate), "MMM d")}
+                          {format(parseISO(userProfile.target_date), "MMM d, yyyy")}
                         </span>
                       </div>
                     )}
+
+                    <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
+                      <span className="text-gray-400">Total Entries</span>
+                      <span className="font-semibold">
+                        {weightEntries.length}
+                      </span>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -919,31 +1074,29 @@ export default function WeightWiseTracker() {
                   <div className="space-y-3">
                     <AnimatePresence>
                       {weightEntries.length > 0 ? (
-                        [...weightEntries]
-                          .reverse()
-                          .slice(0, 5)
-                          .map((entry, index) => (
-                            <motion.div
-                              key={entry.id}
-                              initial={{ x: -20, opacity: 0 }}
-                              animate={{ x: 0, opacity: 1 }}
-                              transition={{ delay: index * 0.1 }}
-                              className="flex items-center justify-between p-4 rounded-lg bg-gray-800/30 hover:bg-gray-800/50 transition-colors group"
-                            >
-                              <div>
-                                <p className="font-semibold text-lg">
-                                  {entry.weight.toFixed(1)} kg
-                                </p>
-                                <p className="text-sm text-gray-400">
-                                  {format(
-                                    parseISO(entry.date),
-                                    "MMM d, h:mm a"
-                                  )}
-                                </p>
-                              </div>
-                              <ChevronRight className="h-4 w-4 text-gray-500 group-hover:text-gray-300 transition-colors" />
-                            </motion.div>
-                          ))
+                        weightEntries.slice(0, 5).map((entry, index) => (
+                          <motion.div
+                            key={entry.id}
+                            initial={{ x: -20, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            transition={{ delay: index * 0.1 }}
+                            className="flex items-center justify-between p-4 rounded-lg bg-gray-800/30 hover:bg-gray-800/50 transition-colors group"
+                          >
+                            <div>
+                              <p className="font-semibold text-lg">
+                                {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                                {safeToFixed(entry.weight, 1)} kg
+                              </p>
+                              <p className="text-sm text-gray-400">
+                                {format(
+                                  parseISO(entry.date),
+                                  "MMM d, h:mm a"
+                                )}
+                              </p>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-gray-500 group-hover:text-gray-300 transition-colors" />
+                          </motion.div>
+                        ))
                       ) : (
                         <div className="text-center py-8">
                           <div className="w-16 h-16 rounded-full bg-gray-800/50 flex items-center justify-center mx-auto mb-4">
@@ -963,6 +1116,9 @@ export default function WeightWiseTracker() {
                       <Button
                         variant="ghost"
                         className="w-full text-gray-400 hover:text-white"
+                        onClick={() => {
+                          toast.info("All entries view coming soon!");
+                        }}
                       >
                         View All {weightEntries.length} Entries
                         <ChevronRight className="ml-2 h-4 w-4" />
@@ -985,10 +1141,9 @@ export default function WeightWiseTracker() {
                       <Zap className="h-6 w-6 text-green-400" />
                     </div>
                     <div>
-                      <h4 className="font-semibold mb-2">Daily Tip</h4>
+                      <h4 className="font-semibold mb-2">Cloud Storage Active</h4>
                       <p className="text-sm text-gray-300">
-                        Consistency beats intensity. Track daily for best
-                        results and celebrate small wins along the way!
+                        Your data is securely backed up in Neon PostgreSQL. You can access it from any device!
                       </p>
                     </div>
                   </div>

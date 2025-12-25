@@ -8,8 +8,8 @@ import { Toaster } from "@/components/ui/sonner";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Weight Tracking App", // Changed app name
-  description: "Ultra-modern weight tracking application",
+  title: "WeightWise Pro",
+  description: "Ultra-modern weight tracking application with cloud sync",
 };
 
 export default function RootLayout({
@@ -22,11 +22,11 @@ export default function RootLayout({
       <body className={`${inter.className} antialiased`}>
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
+          defaultTheme="dark"
           enableSystem
           disableTransitionOnChange
         >
-          <div className="relative flex min-h-screen flex-col">
+          <div className="relative flex min-h-screen flex-col bg-background">
             {children}
             <Toaster
               theme="dark"

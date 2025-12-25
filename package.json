@@ -1,43 +1,92 @@
 {
-  "name": "weight-tracking-app",
-  "version": "0.1.0",
-  "private": true,
+  "name": "weightwise-pro",
+  "version": "1.0.0",
+  "description": "Modern Weight Tracking App with Cloud Sync",
+  "author": "Houssem-DH",
   "main": "main.js",
-"build": {
-  "appId": "com.weightwise.tracker",
-  "productName": "WeightWise Pro",
-  "directories": {
-    "output": "dist"
+  "private": true,
+  "build": {
+    "appId": "com.weightwise.app",
+    "productName": "WeightWise Pro",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "next.config.js",
+      "package.json",
+      "node_modules/**/*",
+      ".next/**/*",
+      "app/**/*",
+      "components/**/*",
+      "lib/**/*",
+      "public/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/logo.ico",
+      "legalTrademarks": "WeightWise Pro",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WeightWise Pro",
+      "installerIcon": "public/logo.ico",
+      "uninstallerIcon": "public/logo.ico",
+      "license": "LICENSE",
+      "menuCategory": "WeightWise Pro"
+    },
+    "portable": {
+      "artifactName": "WeightWisePro-Portable.exe"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "**\\node_modules\\sharp\\**",
+      "**\\node_modules\\@neondatabase\\**",
+      ".next/standalone/**"
+    ],
+    "extraResources": [
+      {
+        "from": ".env.local",
+        "to": ".env.local"
+      }
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    }
   },
-  "files": [
-    "out/**/*",
-    "main.js",
-    "package.json",
-    "node_modules/**/*"
-  ],
-  "win": {
-    "target": "nsis",
-    "icon": "public/logo.ico"
-  },
-  "nsis": {
-    "oneClick": false,
-    "allowToChangeInstallationDirectory": true,
-    "createDesktopShortcut": true,
-    "createStartMenuShortcut": true,
-    "shortcutName": "WeightWise Pro"
-  },
-  "forceCodeSigning": false
-},
   "scripts": {
-  "dev": "next dev",
-  "build": "next build",
-  "electron": "electron .",
-  "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\"",
-  "pack": "npm run build && electron-builder --dir",
-  "dist": "npm run build && electron-builder"
-},
+    "dev": "next dev --webpack",
+    "build": "cross-env TURBOPACK=0 NEXT_PRIVATE_TURBOPACK=0 next build",
+    "build:clean": "if exist .next (rmdir /s /q .next) && npm run build",
+    "start": "next start",
+    "electron": "electron .",
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\"",
+    "pack": "npm run build:clean && electron-builder --dir",
+    "dist": "npm run build:clean && electron-builder",
+    "dist:win": "npm run build:clean && electron-builder --win",
+    "clean": "if exist .next rmdir /s /q .next && if exist release rmdir /s /q release && if exist dist rmdir /s /q dist && if exist out rmdir /s /q out",
+    "clean:all": "npm run clean && if exist node_modules rmdir /s /q node_modules && if exist package-lock.json del package-lock.json"
+  },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
+    "@neondatabase/serverless": "^0.10.4",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.8",
@@ -50,6 +99,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "electron-serve": "^3.0.0",
     "framer-motion": "^12.23.26",
     "lucide-react": "^0.562.0",
     "next": "16.1.1",
@@ -65,15 +115,18 @@
     "zustand": "^5.0.9"
   },
   "devDependencies": {
-    "@electron-forge/cli": "^7.10.2",
+    "@electron-forge/cli": "^7.8.3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/recharts": "^1.8.29",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
     "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
+    "electron-log": "^5.4.3",
+    "electron-updater": "^6.6.2",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "tailwindcss": "^4",
