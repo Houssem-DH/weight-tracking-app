@@ -11,70 +11,62 @@
     "directories": {
       "output": "release"
     },
+    "asar": true,
     "files": [
       "main.js",
+      "preload.js",
       "next.config.js",
       "package.json",
-      "node_modules/**/*",
-      ".next/**/*",
-      "app/**/*",
-      "components/**/*",
-      "lib/**/*",
       "public/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": ".next/standalone"
+      },
+      {
+        "from": ".next/static",
+        "to": ".next/static"
+      },
+      {
+        "from": "public",
+        "to": "public"
+      },
+      {
+        "from": ".env.local",
+        "to": ".env.local"
+      }
     ],
     "win": {
       "target": [
         {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
       "icon": "public/logo.ico",
-      "legalTrademarks": "WeightWise Pro",
-      "requestedExecutionLevel": "asInvoker"
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "WeightWise Pro",
       "installerIcon": "public/logo.ico",
       "uninstallerIcon": "public/logo.ico",
-      "license": "LICENSE",
       "menuCategory": "WeightWise Pro"
-    },
-    "portable": {
-      "artifactName": "WeightWisePro-Portable.exe"
-    },
-    "asar": true,
-    "asarUnpack": [
-      "**\\node_modules\\sharp\\**",
-      "**\\node_modules\\@neondatabase\\**",
-      ".next/standalone/**"
-    ],
-    "extraResources": [
-      {
-        "from": ".env.local",
-        "to": ".env.local"
-      }
-    ],
-    "extraMetadata": {
-      "main": "main.js"
     }
   },
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "cross-env TURBOPACK=0 NEXT_PRIVATE_TURBOPACK=0 next build",
-    "build:clean": "if exist .next (rmdir /s /q .next) && npm run build",
+    "build": "cross-env TURBOPACK=0 NEXT_PRIVATE_TURBOPACK=0 next build && node build/check-standalone.js && node build/fix-standalone.js",
+    "build:clean": "if exist .next rmdir /s /q .next & npm run build",
     "start": "next start",
     "electron": "electron .",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\"",
@@ -99,6 +91,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "dotenv": "^16.4.5",
     "electron-serve": "^3.0.0",
     "framer-motion": "^12.23.26",
     "lucide-react": "^0.562.0",

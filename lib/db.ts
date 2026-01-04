@@ -1,17 +1,11 @@
 // lib/db.ts
 import { neon } from "@neondatabase/serverless";
 
-// Check if environment variable exists
 if (!process.env.NEON_DATABASE_URL) {
   throw new Error("NEON_DATABASE_URL is not defined in environment variables");
 }
 
 const sql = neon(process.env.NEON_DATABASE_URL);
-
-// Test connection in development
-if (process.env.NODE_ENV === "development") {
-  console.log("✅ Neon database configured");
-}
 
 export type DBUserProfile = {
   id: number;
@@ -34,84 +28,64 @@ export type DBWeightEntry = {
 };
 
 export const db = {
-  // User operations
-  async createUser(
-    name: string,
-    startWeight: number,
-    goalWeight: number | null,
-    targetDate?: string
-  ) {
-    try {
-      const result = await sql`
-        INSERT INTO user_profiles (name, start_weight, goal_weight, target_date)
-        VALUES (${name}, ${startWeight}, ${goalWeight}, ${targetDate})
-        RETURNING *
-      `;
-      return result[0] as DBUserProfile;
-    } catch (error: any) {
-      console.error("Database error in createUser:", error);
-      throw new Error(`Database error: ${error.message}`);
-    }
+  async createUser(name: string, startWeight: number, goalWeight: number | null, targetDate?: string) {
+    const result = await sql`
+      INSERT INTO user_profiles (name, start_weight, goal_weight, target_date)
+      VALUES (${name}, ${startWeight}, ${goalWeight}, ${targetDate})
+      RETURNING *
+    `;
+    return result[0] as DBUserProfile;
   },
 
   async getUser(userId: number) {
-    try {
-      const result = await sql`
-        SELECT * FROM user_profiles WHERE id = ${userId}
-      `;
-      return result[0] as DBUserProfile | undefined;
-    } catch (error: any) {
-      console.error("Database error in getUser:", error);
-      throw new Error(`Failed to fetch user profile: ${error.message}`);
-    }
+    const result = await sql`
+      SELECT * FROM user_profiles WHERE id = ${userId}
+    `;
+    return result[0] as DBUserProfile | undefined;
   },
 
   async deleteUser(userId: number) {
-    try {
-      await sql`DELETE FROM user_profiles WHERE id = ${userId}`;
-      return true;
-    } catch (error: any) {
-      console.error("Database error in deleteUser:", error);
-      throw new Error(`Failed to delete user profile: ${error.message}`);
-    }
+    await sql`DELETE FROM user_profiles WHERE id = ${userId}`;
+    return true;
   },
 
-  // Weight entry operations
   async createWeightEntry(userId: number, weight: number, note?: string) {
-    try {
-      const result = await sql`
-        INSERT INTO weight_entries (user_id, weight, note)
-        VALUES (${userId}, ${weight}, ${note})
-        RETURNING *
-      `;
-      return result[0] as DBWeightEntry;
-    } catch (error: any) {
-      console.error("Database error in createWeightEntry:", error);
-      throw new Error(`Failed to create weight entry: ${error.message}`);
-    }
+    const result = await sql`
+      INSERT INTO weight_entries (user_id, weight, note)
+      VALUES (${userId}, ${weight}, ${note})
+      RETURNING *
+    `;
+    return result[0] as DBWeightEntry;
   },
 
   async getWeightEntries(userId: number) {
-    try {
-      const result = await sql`
-        SELECT * FROM weight_entries 
-        WHERE user_id = ${userId} 
-        ORDER BY date DESC
-      `;
-      return result as DBWeightEntry[];
-    } catch (error: any) {
-      console.error("Database error in getWeightEntries:", error);
-      throw new Error(`Failed to fetch weight entries: ${error.message}`);
-    }
+    const result = await sql`
+      SELECT * FROM weight_entries
+      WHERE user_id = ${userId}
+      ORDER BY date DESC
+    `;
+    return result as DBWeightEntry[];
   },
 
   async deleteWeightEntries(userId: number) {
-    try {
-      await sql`DELETE FROM weight_entries WHERE user_id = ${userId}`;
-      return true;
-    } catch (error: any) {
-      console.error("Database error in deleteWeightEntries:", error);
-      throw new Error(`Failed to delete weight entries: ${error.message}`);
-    }
+    await sql`DELETE FROM weight_entries WHERE user_id = ${userId}`;
+    return true;
+  },
+
+  // ✅ NEW: Update entry
+  async updateWeightEntry(entryId: number, weight: number, note?: string) {
+    const result = await sql`
+      UPDATE weight_entries
+      SET weight = ${weight}, note = ${note}, date = NOW()
+      WHERE id = ${entryId}
+      RETURNING *
+    `;
+    return result[0] as DBWeightEntry;
+  },
+
+  // ✅ NEW: Delete one entry
+  async deleteWeightEntry(entryId: number) {
+    await sql`DELETE FROM weight_entries WHERE id = ${entryId}`;
+    return true;
   },
 };

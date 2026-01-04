@@ -1,82 +1,119 @@
-// app/api/entries/route.ts
-export const dynamic = 'force-dynamic';
+import { NextResponse } from "next/server";
+import { neon } from "@neondatabase/serverless";
 
-import { db } from '@/lib/db';
-import { NextRequest, NextResponse } from 'next/server';
+// ✅ Load env
+const sql = neon(process.env.NEON_DATABASE_URL!);
 
-export async function POST(request: NextRequest) {
+// =========================
+// GET /api/entries?userId=...
+// =========================
+export async function GET(req: Request) {
   try {
-    const { userId, weight, note } = await request.json();
-    
+    const { searchParams } = new URL(req.url);
+    const userId = searchParams.get("userId");
+
+    if (!userId) {
+      return NextResponse.json({ error: "Missing userId" }, { status: 400 });
+    }
+
+    const entries = await sql`
+      SELECT * FROM weight_entries
+      WHERE user_id = ${userId}
+      ORDER BY date DESC
+    `;
+
+    return NextResponse.json(entries);
+  } catch (err) {
+    console.error("GET entries error:", err);
+    return NextResponse.json({ error: "Failed to load entries" }, { status: 500 });
+  }
+}
+
+// =========================
+// POST /api/entries
+// =========================
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const { userId, weight, note } = body;
+
     if (!userId || !weight) {
       return NextResponse.json(
-        { error: 'User ID and weight are required' },
+        { error: "Missing userId or weight" },
         { status: 400 }
       );
     }
 
-    const entry = await db.createWeightEntry(
-      parseInt(userId),
-      parseFloat(weight),
-      note
-    );
+    const inserted = await sql`
+      INSERT INTO weight_entries (user_id, weight, note, date)
+      VALUES (${userId}, ${weight}, ${note || null}, NOW())
+      RETURNING *
+    `;
 
-    return NextResponse.json(entry, { status: 201 });
-  } catch (error: any) {
-    console.error('Error in POST /api/entries:', error);
-    return NextResponse.json(
-      { error: 'Failed to create weight entry', details: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json(inserted[0]);
+  } catch (err) {
+    console.error("POST entry error:", err);
+    return NextResponse.json({ error: "Failed to create entry" }, { status: 500 });
   }
 }
 
-export async function GET(request: NextRequest) {
+// =========================
+// PATCH /api/entries
+// ✅ update weight + note + date
+// =========================
+export async function PATCH(req: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
-    
-    if (!userId) {
+    const body = await req.json();
+    const { entryId, weight, note, date } = body;
+
+    if (!entryId || weight === undefined) {
       return NextResponse.json(
-        { error: 'User ID is required' },
+        { error: "Missing entryId or weight" },
         { status: 400 }
       );
     }
-    
-    const entries = await db.getWeightEntries(parseInt(userId));
-    return NextResponse.json(entries);
-  } catch (error: any) {
-    console.error('Error in GET /api/entries:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch weight entries', details: error.message },
-      { status: 500 }
-    );
+
+    // ✅ Default date = current DB date if not provided
+    const updated = await sql`
+      UPDATE weight_entries
+      SET weight = ${weight},
+          note = ${note},
+          date = COALESCE(${date}, date)
+      WHERE id = ${entryId}
+      RETURNING *
+    `;
+
+    if (!updated.length) {
+      return NextResponse.json({ error: "Entry not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(updated[0]);
+  } catch (err) {
+    console.error("PATCH entry error:", err);
+    return NextResponse.json({ error: "Failed to update entry" }, { status: 500 });
   }
 }
 
-export async function DELETE(request: NextRequest) {
+// =========================
+// DELETE /api/entries?id=...
+// =========================
+export async function DELETE(req: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
-    
-    if (!userId) {
-      return NextResponse.json(
-        { error: 'User ID is required' },
-        { status: 400 }
-      );
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get("id");
+
+    if (!id) {
+      return NextResponse.json({ error: "Missing entry id" }, { status: 400 });
     }
-    
-    await db.deleteWeightEntries(parseInt(userId));
-    
-    return NextResponse.json(
-      { success: true, message: 'All weight entries deleted successfully' },
-      { status: 200 }
-    );
-  } catch (error: any) {
-    console.error('Error in DELETE /api/entries:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete weight entries', details: error.message },
-      { status: 500 }
-    );
+
+    await sql`
+      DELETE FROM weight_entries
+      WHERE id = ${id}
+    `;
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("DELETE entry error:", err);
+    return NextResponse.json({ error: "Failed to delete entry" }, { status: 500 });
   }
 }

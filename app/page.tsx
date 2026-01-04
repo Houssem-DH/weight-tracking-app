@@ -1,8 +1,14 @@
-// app/page.tsx
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { format, parseISO, differenceInDays, startOfDay } from "date-fns";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  format,
+  parseISO,
+  differenceInDays,
+  startOfDay,
+  isSameDay,
+  subDays,
+} from "date-fns";
 import {
   AreaChart,
   Area,
@@ -11,9 +17,11 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  ReferenceLine,
 } from "recharts";
 import {
   Scale,
+  TrendingDown,
   TrendingUp,
   Calendar,
   User,
@@ -29,6 +37,12 @@ import {
   Loader2,
   RotateCw,
   BarChart3,
+  Pencil,
+  Trash2,
+  Check,
+  ShieldCheck,
+  Clock,
+  Quote,
 } from "lucide-react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
@@ -49,11 +63,20 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Slider } from "@/components/ui/slider";
 
-// ==================== HELPER FUNCTIONS ====================
-// PostgreSQL DECIMAL/NUMERIC types come as strings, so we need to convert them
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+
+// ==================== HELPERS ====================
 const safeToNumber = (value: any): number => {
   if (value === null || value === undefined) return 0;
-  const num = typeof value === 'string' ? parseFloat(value) : value;
+  const num = typeof value === "string" ? parseFloat(value) : value;
   return isNaN(num) ? 0 : num;
 };
 
@@ -61,15 +84,28 @@ const safeToFixed = (value: any, decimals: number = 1): string => {
   const num = safeToNumber(value);
   return num.toFixed(decimals);
 };
-// ==========================================================
 
-// Updated types to match database schema
+const apiCall = async (endpoint: string, options: RequestInit = {}) => {
+  const response = await fetch(`/api/${endpoint}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || "API request failed");
+  }
+
+  return response.json();
+};
+
+// ==================== TYPES ====================
 type WeightEntry = {
   id: number;
   user_id: number;
   date: string;
   weight: number;
-  note?: string;
+  note?: string | null;
   created_at: string;
 };
 
@@ -84,105 +120,322 @@ type UserProfile = {
   updated_at: string;
 };
 
-// Helper function for API calls
-const apiCall = async (endpoint: string, options: RequestInit = {}) => {
-  const response = await fetch(`/api/${endpoint}`, {
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    ...options,
-  });
+// ==================== MOTIVATION ====================
+type MotivationMood = "good" | "warning" | "neutral" | "celebrate";
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error || 'API request failed');
+type Motivation = {
+  title: string;
+  message: string;
+  mood: MotivationMood;
+  icon: any;
+};
+
+const pickRandom = <T,>(arr: T[]) =>
+  arr[Math.floor(Math.random() * arr.length)];
+
+const buildMotivation = ({
+  user,
+  stats,
+  entryToday,
+}: {
+  user: UserProfile;
+  stats: any;
+  entryToday: WeightEntry | null;
+}): Motivation => {
+  const hasGoal = !!user.goal_weight;
+  const goal = user.goal_weight || 0;
+  const current = stats?.currentWeight ?? user.start_weight;
+  const streak = stats?.streak ?? 1;
+  const weekly = stats?.weeklyAvg ?? 0;
+  const progress = stats?.goalProgress ?? 0;
+
+  const remaining = hasGoal ? Math.abs(current - goal) : null;
+
+  const celebrate: Motivation[] = [
+    {
+      title: "You’re unstoppable 🔥",
+      message: `Your streak is ${streak} days. That’s real discipline.`,
+      mood: "celebrate",
+      icon: Flame,
+    },
+    {
+      title: "Goal progress unlocked 🏆",
+      message: `You’ve completed ${safeToFixed(progress, 0)}% of your goal. Keep attacking!`,
+      mood: "celebrate",
+      icon: Trophy,
+    },
+    {
+      title: "Momentum is on your side ⚡",
+      message: `Your trend is ${safeToFixed(weekly, 2)}kg/week. That’s elite progress.`,
+      mood: "celebrate",
+      icon: Zap,
+    },
+    {
+      title: "Consistency beats talent 💎",
+      message: `Every day you log is a step closer to who you want to be.`,
+      mood: "celebrate",
+      icon: Sparkles,
+    },
+  ];
+
+  const good: Motivation[] = [
+    {
+      title: "Small steps = big results 🌱",
+      message: hasGoal
+        ? `Only ${safeToFixed(remaining, 1)}kg left until your goal. You're closer than you think.`
+        : "Consistency beats motivation. Just show up today.",
+      mood: "good",
+      icon: Target,
+    },
+    {
+      title: "You’re building the habit ✅",
+      message: `Your streak is growing. Keep the rhythm alive.`,
+      mood: "good",
+      icon: Activity,
+    },
+    {
+      title: "Progress is invisible until it’s not ✨",
+      message: "Keep going. Your future self will thank you.",
+      mood: "good",
+      icon: Sparkles,
+    },
+  ];
+
+  const warning: Motivation[] = [
+    {
+      title: "Fluctuations are normal 🚧",
+      message:
+        "Daily weight goes up and down. Focus on the trend — not one day.",
+      mood: "warning",
+      icon: TrendingUp,
+    },
+    {
+      title: "Don’t quit. Adjust 🧠",
+      message:
+        "Weight increases are feedback, not failure. Hydrate, sleep, move.",
+      mood: "warning",
+      icon: RotateCw,
+    },
+  ];
+
+  const neutral: Motivation[] = [
+    {
+      title: "Today is a checkpoint 📍",
+      message: "Log your weight today. Data creates clarity.",
+      mood: "neutral",
+      icon: Calendar,
+    },
+    {
+      title: "Future you is watching 👀",
+      message: "One entry today makes tomorrow easier. Keep the rhythm.",
+      mood: "neutral",
+      icon: Clock,
+    },
+  ];
+
+  if (!entryToday) return pickRandom(neutral);
+
+  if (hasGoal && current <= goal) {
+    return {
+      title: "Goal achieved 🏆",
+      message:
+        "You did it! Now focus on maintaining and improving your lifestyle.",
+      mood: "celebrate",
+      icon: Trophy,
+    };
   }
 
-  return response.json();
+  if (weekly < 0) return pickRandom([...celebrate, ...good]);
+  if (weekly > 0 && hasGoal) return pickRandom(warning);
+
+  return pickRandom([...good, ...neutral]);
 };
+
+// ==================== PREMIUM TOOLTIP ====================
+function ModernTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+
+  const value = payload[0].value;
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-gray-950/80 px-4 py-3 backdrop-blur-xl shadow-2xl">
+      <p className="text-xs text-gray-400 mb-1">{label}</p>
+      <p className="text-lg font-semibold text-white">
+        {safeToFixed(value, 1)}{" "}
+        <span className="text-sm text-gray-400">kg</span>
+      </p>
+    </div>
+  );
+}
 
 export default function WeightWiseTracker() {
   const [isLoading, setIsLoading] = useState(true);
+
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [weightEntries, setWeightEntries] = useState<WeightEntry[]>([]);
+
+  // Setup
   const [setupName, setSetupName] = useState("");
   const [setupCurrentWeight, setSetupCurrentWeight] = useState("");
   const [setupGoalWeight, setSetupGoalWeight] = useState("");
   const [setupTargetWeeks, setSetupTargetWeeks] = useState(12);
-  const [todaysWeight, setTodaysWeight] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Logging today
+  const [todaysWeight, setTodaysWeight] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // localStorage persistence
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [hasLoadedFromStorage, setHasLoadedFromStorage] = useState(false);
 
-  const inputRef = useRef<HTMLInputElement>(null);
+  // Filter range
+  const [range, setRange] = useState<"7d" | "30d" | "all">("30d");
 
-  // Load userId from localStorage ONLY on client side
+  // Editing modal
+  const [editOpen, setEditOpen] = useState(false);
+  const [selectedEntry, setSelectedEntry] = useState<WeightEntry | null>(null);
+
+  const [editWeight, setEditWeight] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [editDate, setEditDate] = useState(""); // YYYY-MM-DD
+
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // ✅ Motivation
+  const [motivation, setMotivation] = useState<Motivation | null>(null);
+
+  // ==================== INIT LOCAL STORAGE ====================
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedId = localStorage.getItem('weightApp_userId');
-      if (savedId) {
-        setCurrentUserId(parseInt(savedId));
-      }
+    if (typeof window !== "undefined") {
+      const savedId = localStorage.getItem("weightApp_userId");
+      if (savedId) setCurrentUserId(parseInt(savedId));
       setHasLoadedFromStorage(true);
     }
   }, []);
 
-  // Focus on weight input when dashboard loads
+  // Focus input when dashboard loads
   useEffect(() => {
     if (userProfile && inputRef.current) {
-      setTimeout(() => {
-        inputRef.current?.focus();
-      }, 300);
+      setTimeout(() => inputRef.current?.focus(), 300);
     }
   }, [userProfile]);
 
-  // Load data from database
+  // ==================== LOAD USER + ENTRIES ====================
   useEffect(() => {
-    const loadSavedData = async () => {
-      // Only run if we've checked localStorage and have a userId
+    const load = async () => {
       if (!hasLoadedFromStorage) return;
-      
+
       try {
-        if (currentUserId) {
-          // Load user profile
-          const user = await apiCall(`user?id=${currentUserId}`);
-          // Convert string numbers to actual numbers
-          const processedUser = {
-            ...user,
-            start_weight: safeToNumber(user.start_weight),
-            goal_weight: user.goal_weight ? safeToNumber(user.goal_weight) : null
-          };
-          setUserProfile(processedUser);
-          
-          // Load weight entries
-          const entries = await apiCall(`entries?userId=${currentUserId}`);
-          // Convert all weight strings to numbers
-          const processedEntries = entries.map((entry: any) => ({
-            ...entry,
-            weight: safeToNumber(entry.weight)
-          }));
-          setWeightEntries(processedEntries);
+        if (!currentUserId) {
+          setIsLoading(false);
+          return;
         }
-      } catch (error) {
-        console.error("Failed to load data:", error);
-        // If user doesn't exist or error, clear localStorage
-        if (error instanceof Error && error.message.includes('not found')) {
-          localStorage.removeItem('weightApp_userId');
-          setCurrentUserId(null);
-        }
-        toast.error("Could not load your saved data.");
+
+        const user = await apiCall(`user?id=${currentUserId}`);
+        const processedUser = {
+          ...user,
+          start_weight: safeToNumber(user.start_weight),
+          goal_weight: user.goal_weight ? safeToNumber(user.goal_weight) : null,
+        };
+        setUserProfile(processedUser);
+
+        const entries = await apiCall(`entries?userId=${currentUserId}`);
+        const processedEntries = entries.map((e: any) => ({
+          ...e,
+          weight: safeToNumber(e.weight),
+        }));
+        setWeightEntries(processedEntries);
+      } catch (err) {
+        console.error(err);
+        localStorage.removeItem("weightApp_userId");
+        setCurrentUserId(null);
+        toast.error("Failed to load saved data.");
       } finally {
         setIsLoading(false);
       }
     };
 
-    // Wait for localStorage check before loading
-    if (hasLoadedFromStorage) {
-      // Simulate loading for better UX
-      setTimeout(loadSavedData, 800);
-    }
+    if (hasLoadedFromStorage) setTimeout(load, 500);
   }, [currentUserId, hasLoadedFromStorage]);
 
+  // ==================== DERIVED VALUES ====================
+  const filteredEntries = useMemo(() => {
+    if (range === "all") return weightEntries;
+
+    const cutoff =
+      range === "7d" ? subDays(new Date(), 7) : subDays(new Date(), 30);
+    return weightEntries.filter((e) => new Date(e.date) >= cutoff);
+  }, [weightEntries, range]);
+
+  const chartData = useMemo(() => {
+    return [...filteredEntries].reverse().map((entry) => ({
+      ...entry,
+      displayDate: format(parseISO(entry.date), "MMM dd"),
+    }));
+  }, [filteredEntries]);
+
+  const stats = useMemo(() => {
+    if (!userProfile || weightEntries.length === 0) return null;
+
+    const latest = weightEntries[0];
+    const first = weightEntries[weightEntries.length - 1];
+
+    const totalChange = latest.weight - first.weight;
+
+    const daysTracked =
+      differenceInDays(new Date(latest.date), new Date(first.date)) || 1;
+    const weeklyAvg = (totalChange / daysTracked) * 7;
+
+    let goalProgress = 0;
+    if (userProfile.goal_weight && totalChange < 0) {
+      const totalToLose = userProfile.start_weight - userProfile.goal_weight;
+      goalProgress = Math.min(100, (Math.abs(totalChange) / totalToLose) * 100);
+    }
+
+    const streak = (() => {
+      if (weightEntries.length < 2) return 1;
+      let s = 1;
+      for (let i = 0; i < weightEntries.length - 1; i++) {
+        const cur = startOfDay(new Date(weightEntries[i].date));
+        const nxt = startOfDay(new Date(weightEntries[i + 1].date));
+        if (differenceInDays(cur, nxt) === 1) s++;
+        else break;
+      }
+      return s;
+    })();
+
+    return {
+      currentWeight: latest.weight,
+      totalChange,
+      weeklyAvg,
+      goalProgress,
+      streak,
+    };
+  }, [userProfile, weightEntries]);
+
+  const entryToday = useMemo(() => {
+    if (!weightEntries.length) return null;
+    const today = new Date();
+    return (
+      weightEntries.find((e) => isSameDay(new Date(e.date), today)) || null
+    );
+  }, [weightEntries]);
+
+  // ✅ Auto update motivation
+  useEffect(() => {
+    if (!userProfile || !stats) return;
+    setMotivation(buildMotivation({ user: userProfile, stats, entryToday }));
+  }, [userProfile, stats, entryToday]);
+
+  const refreshMotivation = () => {
+    if (!userProfile || !stats) return;
+    setMotivation(buildMotivation({ user: userProfile, stats, entryToday }));
+  };
+
+  // ==================== SETUP SUBMIT ====================
   const handleSetupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -195,14 +448,15 @@ export default function WeightWiseTracker() {
 
     try {
       const currentWeightNum = parseFloat(setupCurrentWeight);
-      const goalWeightNum = setupGoalWeight ? parseFloat(setupGoalWeight) : null;
+      const goalWeightNum = setupGoalWeight
+        ? parseFloat(setupGoalWeight)
+        : null;
 
       const targetDate = new Date();
       targetDate.setDate(targetDate.getDate() + setupTargetWeeks * 7);
 
-      // Create user in database
-      const newUser = await apiCall('user', {
-        method: 'POST',
+      const newUser = await apiCall("user", {
+        method: "POST",
         body: JSON.stringify({
           name: setupName.trim(),
           startWeight: currentWeightNum,
@@ -211,21 +465,20 @@ export default function WeightWiseTracker() {
         }),
       });
 
-      // Process the returned user to ensure numbers
       const processedUser = {
         ...newUser,
         start_weight: safeToNumber(newUser.start_weight),
-        goal_weight: newUser.goal_weight ? safeToNumber(newUser.goal_weight) : null
+        goal_weight: newUser.goal_weight
+          ? safeToNumber(newUser.goal_weight)
+          : null,
       };
 
-      // Save user ID to localStorage for persistence
-      localStorage.setItem('weightApp_userId', newUser.id.toString());
+      localStorage.setItem("weightApp_userId", newUser.id.toString());
       setCurrentUserId(newUser.id);
       setHasLoadedFromStorage(true);
 
-      // Create initial weight entry
-      const initialEntry = await apiCall('entries', {
-        method: 'POST',
+      const initialEntry = await apiCall("entries", {
+        method: "POST",
         body: JSON.stringify({
           userId: newUser.id,
           weight: currentWeightNum,
@@ -233,53 +486,46 @@ export default function WeightWiseTracker() {
         }),
       });
 
-      // Process the returned entry to ensure numbers
       const processedEntry = {
         ...initialEntry,
-        weight: safeToNumber(initialEntry.weight)
+        weight: safeToNumber(initialEntry.weight),
       };
 
       setUserProfile(processedUser);
       setWeightEntries([processedEntry]);
 
-      toast.success(`Welcome to your journey, ${setupName.trim()}! 🚀`, {
-        description: "Your data is now securely stored in the cloud.",
+      toast.success(`Welcome ${setupName.trim()} ✨`, {
+        description: "Your dashboard is now ready.",
       });
-    } catch (error) {
-      console.error('Setup failed:', error);
-      toast.error(error instanceof Error ? error.message : "Failed to create your profile. Please try again.");
+    } catch (err) {
+      console.error(err);
+      toast.error("Setup failed. Please try again.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleAddTodaysWeight = async (e: React.FormEvent) => {
+  // ==================== CREATE OR UPDATE TODAY ====================
+  const handleSaveToday = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!todaysWeight || !userProfile) {
-      toast.error("Please enter today's weight.");
-      return;
-    }
+    if (!todaysWeight || !userProfile) return;
 
     const todaysWeightNum = parseFloat(todaysWeight);
-    
-    try {
-      // Check if entry already exists for today
-      const today = startOfDay(new Date()).toISOString();
-      const hasEntryToday = weightEntries.some(entry => 
-        startOfDay(new Date(entry.date)).toISOString() === today
-      );
+    if (isNaN(todaysWeightNum)) return toast.error("Invalid weight value.");
 
-      if (hasEntryToday) {
-        toast.info("You've already logged your weight today!", {
-          description: "You can update it tomorrow.",
-        });
+    try {
+      // If entry exists today => open edit modal
+      if (entryToday) {
+        setSelectedEntry(entryToday);
+        setEditWeight(String(entryToday.weight));
+        setEditNote(entryToday.note || "");
+        setEditDate(format(new Date(entryToday.date), "yyyy-MM-dd"));
+        setEditOpen(true);
         return;
       }
 
-      // Create new entry in database
-      const newEntry = await apiCall('entries', {
-        method: 'POST',
+      const newEntry = await apiCall("entries", {
+        method: "POST",
         body: JSON.stringify({
           userId: userProfile.id,
           weight: todaysWeightNum,
@@ -287,304 +533,276 @@ export default function WeightWiseTracker() {
         }),
       });
 
-      // Process the returned entry to ensure numbers
-      const processedEntry = {
-        ...newEntry,
-        weight: safeToNumber(newEntry.weight)
-      };
+      const processed = { ...newEntry, weight: safeToNumber(newEntry.weight) };
 
-      const updatedEntries = [processedEntry, ...weightEntries];
-      setWeightEntries(updatedEntries);
+      setWeightEntries([processed, ...weightEntries]);
       setTodaysWeight("");
 
-      // Show appropriate toast message
-      if (weightEntries.length > 0) {
-        const lastWeight = weightEntries[0].weight;
-        const difference = todaysWeightNum - lastWeight;
-
-        if (difference < 0) {
-          toast.success(`Amazing progress! 🔥`, {
-            description: `Down ${Math.abs(difference).toFixed(1)}kg from last time!`,
-          });
-        } else if (difference > 0) {
-          toast.info("Weight recorded 📝", {
-            description: `Stay consistent, you've got this!`,
-          });
-        } else {
-          toast.success("Weight maintained! ⚖️");
-        }
-      } else {
-        toast.success("First entry recorded! 🎯");
-      }
-    } catch (error) {
-      console.error('Failed to save entry:', error);
-      toast.error(error instanceof Error ? error.message : "Failed to save your weight entry.");
+      toast.success("Today’s weight logged ✅");
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to save today’s weight.");
     }
   };
 
-  const handleResetData = async () => {
+  // ==================== OPEN EDIT MODAL ====================
+  const openEditModal = (entry: WeightEntry) => {
+    setSelectedEntry(entry);
+    setEditWeight(String(entry.weight));
+    setEditNote(entry.note || "");
+    setEditDate(format(new Date(entry.date), "yyyy-MM-dd"));
+    setEditOpen(true);
+  };
+
+  // ==================== SAVE EDIT ====================
+  const handleSaveEdit = async () => {
+    if (!selectedEntry) return;
+    const newWeightNum = parseFloat(editWeight);
+    if (isNaN(newWeightNum)) return toast.error("Invalid weight.");
+
+    setIsSavingEdit(true);
+
+    try {
+      // Prevent two entries on same date
+      const newDate = new Date(editDate);
+      const collision = weightEntries.find(
+        (e) => e.id !== selectedEntry.id && isSameDay(new Date(e.date), newDate)
+      );
+
+      if (collision) {
+        toast.error("You already have an entry on this date!");
+        setIsSavingEdit(false);
+        return;
+      }
+
+      // PATCH weight + note
+      const updated = await apiCall("entries", {
+        method: "PATCH",
+        body: JSON.stringify({
+          entryId: selectedEntry.id,
+          weight: newWeightNum,
+          note: editNote || null,
+          date: new Date(editDate).toISOString(), // ✅ SEND DATE TO DATABASE
+        }),
+      });
+
+      // If date changed => update locally by overwriting date
+      const updatedEntry: WeightEntry = {
+        ...selectedEntry,
+        ...updated,
+        weight: safeToNumber(updated.weight),
+        note: editNote || null,
+        date: updated.date, // ✅ use DB response (source of truth)
+
+      };
+
+      const newEntries = weightEntries
+        .map((e) => (e.id === selectedEntry.id ? updatedEntry : e))
+        .sort(
+          (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+        );
+
+      setWeightEntries(newEntries);
+
+      toast.success("Entry updated ✨");
+      setEditOpen(false);
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to update entry.");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  // ==================== DELETE ENTRY ====================
+  const handleDeleteEntry = async () => {
+    if (!selectedEntry) return;
+    setIsDeleting(true);
+
+    try {
+      await apiCall(`entries?id=${selectedEntry.id}`, {
+        method: "DELETE",
+      });
+
+      setWeightEntries(weightEntries.filter((e) => e.id !== selectedEntry.id));
+      toast.success("Entry deleted 🗑️");
+
+      setDeleteConfirmOpen(false);
+      setEditOpen(false);
+    } catch (err) {
+      console.error(err);
+      toast.error("Delete failed.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // ==================== RESET ====================
+  const handleResetAll = async () => {
     if (!userProfile) return;
 
-    toast("Starting fresh?", {
-      description: "This will delete all your data from the cloud.",
+    toast("Reset everything?", {
+      description: "Deletes all your data from the cloud.",
       action: {
         label: "Reset",
         onClick: async () => {
           try {
-            // Delete user (which cascades to entries)
-            await apiCall(`user?id=${userProfile.id}`, {
-              method: 'DELETE',
-            });
-
-            // Clear local state
-            localStorage.removeItem('weightApp_userId');
+            await apiCall(`user?id=${userProfile.id}`, { method: "DELETE" });
+            localStorage.removeItem("weightApp_userId");
             setUserProfile(null);
             setWeightEntries([]);
-            setTodaysWeight("");
             setCurrentUserId(null);
             setHasLoadedFromStorage(true);
-
-            toast.success("All data deleted successfully! ✨");
-          } catch (error) {
-            console.error('Reset failed:', error);
-            toast.error("Failed to reset data. Please try again.");
+            toast.success("Account reset successfully.");
+          } catch {
+            toast.error("Reset failed.");
           }
         },
       },
     });
   };
 
-  const calculateStats = useCallback(() => {
-    if (weightEntries.length === 0 || !userProfile) return null;
-
-    const latest = weightEntries[0];
-    const first = weightEntries[weightEntries.length - 1];
-    const totalChange = latest.weight - first.weight;
-    const daysTracked =
-      differenceInDays(new Date(latest.date), new Date(first.date)) || 1;
-    const changePerDay = totalChange / daysTracked;
-    const changePerWeek = changePerDay * 7;
-
-    // Calculate progress towards goal
-    let goalProgress = 0;
-    if (userProfile.goal_weight && totalChange < 0) {
-      const totalToLose = userProfile.start_weight - userProfile.goal_weight;
-      const lostSoFar = Math.abs(totalChange);
-      goalProgress = Math.min(100, (lostSoFar / totalToLose) * 100);
-    }
-
-    return {
-      currentWeight: latest.weight,
-      totalChange,
-      changePerWeek,
-      daysTracked,
-      goalProgress,
-      streak: calculateStreak(),
-    };
-  }, [weightEntries, userProfile]);
-
-  const calculateStreak = useCallback(() => {
-    if (weightEntries.length < 2) return 1;
-
-    let streak = 1;
-    for (let i = 0; i < weightEntries.length - 1; i++) {
-      const currentDate = startOfDay(new Date(weightEntries[i].date));
-      const nextDate = startOfDay(new Date(weightEntries[i + 1].date));
-      const diffDays = Math.abs(differenceInDays(currentDate, nextDate));
-
-      if (diffDays === 1) streak++;
-      else break;
-    }
-
-    return streak;
-  }, [weightEntries]);
-
-  const stats = calculateStats();
-  const chartData = [...weightEntries].reverse().map((entry) => ({
-    ...entry,
-    displayDate: format(parseISO(entry.date), "MMM dd"),
-  }));
-
-  // Loading screen
+  // ==================== LOADING ====================
   if (isLoading) {
     return (
-      <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-gray-900 via-black to-purple-950 flex items-center justify-center">
-        <div className="absolute inset-0">
-          <div className="absolute top-1/4 left-1/4 w-72 h-72 bg-purple-500/10 rounded-full blur-3xl animate-pulse" />
-          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse delay-700" />
-        </div>
-
-        <div className="relative z-10 text-center">
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
           <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
+            initial={{ scale: 0.85, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            transition={{ duration: 0.5 }}
-            className="mb-8"
+            transition={{ duration: 0.6 }}
+            className="mb-6"
           >
-            <div className="relative inline-block">
-              <div className="w-24 h-24 rounded-full overflow-hidden border-2 border-purple-500/20">
-                <Image
-                  src="/logo.png"
-                  alt="WeightWise Logo"
-                  width={96}
-                  height={96}
-                  className="w-full h-full object-cover"
-                  priority
-                />
-              </div>
-              <div className="absolute -top-2 -right-2">
-                <Sparkles className="w-8 h-8 text-yellow-400 animate-spin-slow" />
-              </div>
+            <div className="w-24 h-24 rounded-3xl overflow-hidden border border-white/10 bg-white/5 backdrop-blur shadow-xl mx-auto">
+              <Image
+                src="/logo.png"
+                alt="logo"
+                width={96}
+                height={96}
+                priority
+              />
             </div>
           </motion.div>
-
-          <motion.h1
-            initial={{ y: 20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ delay: 0.2 }}
-            className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400 mb-4"
-          >
+          <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-blue-400 to-pink-400">
             WeightWise Pro
-          </motion.h1>
-
-          <motion.p
-            initial={{ y: 20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ delay: 0.3 }}
-            className="text-gray-400 mb-8"
-          >
-            Preparing your futuristic dashboard
-          </motion.p>
-
-          <motion.div
-            initial={{ width: 0 }}
-            animate={{ width: "200px" }}
-            transition={{ delay: 0.4, duration: 1.5 }}
-            className="h-1 bg-gradient-to-r from-purple-500 to-blue-500 rounded-full mx-auto"
-          />
+          </h1>
+          <p className="text-gray-400 mt-2">Launching your dashboard…</p>
+          <div className="mt-7 h-1 w-52 bg-gradient-to-r from-purple-500 to-blue-500 rounded-full mx-auto animate-pulse" />
         </div>
       </div>
     );
   }
 
-  // Setup screen
+  // ==================== SETUP SCREEN ====================
   if (!userProfile) {
     return (
-      <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-gray-900 via-black to-purple-950 flex items-center justify-center p-4">
-        <div className="absolute inset-0">
-          {[...Array(20)].map((_, i) => (
-            <motion.div
-              key={i}
-              className="absolute w-1 h-1 bg-white/10 rounded-full"
-              style={{
-                left: `${Math.random() * 100}%`,
-                top: `${Math.random() * 100}%`,
-              }}
-              animate={{
-                y: [0, -30, 0],
-                opacity: [0.1, 0.5, 0.1],
-              }}
-              transition={{
-                duration: 2 + Math.random() * 3,
-                repeat: Infinity,
-                delay: Math.random() * 2,
-              }}
-            />
-          ))}
-        </div>
-
-        <Card className="relative z-10 w-full max-w-2xl border-0 bg-gradient-to-br from-gray-800/50 to-gray-900/50 backdrop-blur-xl shadow-2xl">
+      <div className="min-h-screen flex items-center justify-center px-6 py-10">
+        <Card className="w-full max-w-4xl border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-2xl">
           <CardHeader className="text-center space-y-4">
             <motion.div
               initial={{ scale: 0 }}
               animate={{ scale: 1 }}
-              transition={{ type: "spring", stiffness: 200 }}
-              className="inline-block p-4 rounded-2xl bg-gradient-to-r from-purple-500/20 to-blue-500/20"
+              transition={{ type: "spring", stiffness: 160 }}
+              className="inline-flex justify-center"
             >
-              <Zap className="w-12 h-12 text-purple-400" />
+              <div className="p-4 rounded-3xl bg-gradient-to-r from-purple-500/20 to-blue-500/20 border border-white/10 shadow-xl">
+                <ShieldCheck className="w-12 h-12 text-purple-300" />
+              </div>
             </motion.div>
-            <CardTitle className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
-              Begin Your Journey
+
+            <CardTitle className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-blue-400 to-pink-400">
+              Start your journey
             </CardTitle>
-            <CardDescription className="text-lg text-gray-300">
-              Your data will be securely stored in the cloud
+
+            <CardDescription className="text-gray-300 text-lg">
+              Your progress is safely stored and synced in the cloud.
             </CardDescription>
+
+            <div className="flex justify-center gap-2">
+              <Badge className="bg-white/5 border-white/10 text-gray-200">
+                <Sparkles className="w-4 h-4 mr-2" />
+                Premium UI
+              </Badge>
+              <Badge className="bg-white/5 border-white/10 text-gray-200">
+                <ShieldCheck className="w-4 h-4 mr-2" />
+                Cloud Backup
+              </Badge>
+              <Badge className="bg-white/5 border-white/10 text-gray-200">
+                <Clock className="w-4 h-4 mr-2" />
+                Daily Habit
+              </Badge>
+            </div>
           </CardHeader>
 
-          <CardContent>
-            <form onSubmit={handleSetupSubmit} className="space-y-8">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-4">
-                  <div className="space-y-3">
-                    <Label className="text-gray-300 flex items-center gap-2">
-                      <User className="w-4 h-4" />
-                      Your Name
+          <CardContent className="pt-6">
+            <form onSubmit={handleSetupSubmit} className="space-y-10">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-5">
+                  <div>
+                    <Label className="text-gray-200 flex items-center gap-2 mb-2">
+                      <User className="w-4 h-4 text-gray-300" />
+                      Name
                     </Label>
                     <Input
                       value={setupName}
                       onChange={(e) => setSetupName(e.target.value)}
-                      placeholder="Enter your name"
-                      className="h-14 bg-gray-800/50 border-gray-700 text-lg backdrop-blur-sm"
+                      placeholder="e.g. Houssem"
+                      className="h-14 text-lg bg-white/5 border-white/10"
                       required
                     />
                   </div>
 
-                  <div className="space-y-3">
-                    <Label className="text-gray-300 flex items-center gap-2">
-                      <Scale className="w-4 h-4" />
-                      Current Weight (kg)
+                  <div>
+                    <Label className="text-gray-200 flex items-center gap-2 mb-2">
+                      <Scale className="w-4 h-4 text-gray-300" />
+                      Current Weight
                     </Label>
                     <Input
                       type="number"
                       step="0.1"
                       value={setupCurrentWeight}
                       onChange={(e) => setSetupCurrentWeight(e.target.value)}
-                      placeholder="e.g., 75.5"
-                      className="h-14 bg-gray-800/50 border-gray-700 text-lg backdrop-blur-sm"
+                      placeholder="e.g. 75.5"
+                      className="h-14 text-lg bg-white/5 border-white/10"
                       required
-                      min="30"
-                      max="300"
                     />
                   </div>
                 </div>
 
-                <div className="space-y-4">
-                  <div className="space-y-3">
-                    <Label className="text-gray-300 flex items-center gap-2">
-                      <Target className="w-4 h-4" />
-                      Goal Weight (kg)
+                <div className="space-y-5">
+                  <div>
+                    <Label className="text-gray-200 flex items-center gap-2 mb-2">
+                      <Target className="w-4 h-4 text-gray-300" />
+                      Goal Weight (optional)
                     </Label>
                     <Input
                       type="number"
                       step="0.1"
                       value={setupGoalWeight}
                       onChange={(e) => setSetupGoalWeight(e.target.value)}
-                      placeholder="e.g., 70.0"
-                      className="h-14 bg-gray-800/50 border-gray-700 text-lg backdrop-blur-sm"
-                      min="30"
-                      max="300"
+                      placeholder="e.g. 70.0"
+                      className="h-14 text-lg bg-white/5 border-white/10"
                     />
                   </div>
 
-                  <div className="space-y-3">
-                    <Label className="text-gray-300">
-                      Target Timeline:{" "}
-                      <span className="text-purple-400">
-                        {setupTargetWeeks} weeks
+                  <div>
+                    <Label className="text-gray-200 mb-2 block">
+                      Timeline{" "}
+                      <span className="text-purple-300 font-semibold">
+                        ({setupTargetWeeks} weeks)
                       </span>
                     </Label>
-                    <div className="pt-2">
+                    <div className="rounded-2xl bg-white/5 border border-white/10 px-5 py-5">
                       <Slider
                         value={[setupTargetWeeks]}
-                        onValueChange={(value) => setSetupTargetWeeks(value[0])}
+                        onValueChange={(v) => setSetupTargetWeeks(v[0])}
                         min={4}
                         max={52}
                         step={1}
-                        className="w-full"
                       />
-                      <div className="flex justify-between text-sm text-gray-400 mt-2">
+                      <div className="flex justify-between text-xs text-gray-400 mt-3">
                         <span>4 weeks</span>
-                        <span>1 year</span>
+                        <span>52 weeks</span>
                       </div>
                     </div>
                   </div>
@@ -598,12 +816,12 @@ export default function WeightWiseTracker() {
                 <Button
                   type="submit"
                   disabled={isSubmitting}
-                  className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 border-0"
+                  className="w-full h-16 text-lg font-semibold bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 shadow-xl"
                 >
                   {isSubmitting ? (
                     <>
                       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                      Creating Your Profile...
+                      Creating profile…
                     </>
                   ) : (
                     <>
@@ -620,539 +838,643 @@ export default function WeightWiseTracker() {
     );
   }
 
-  // Main Dashboard
+  // ==================== DASHBOARD ====================
   return (
-    <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-gray-900 via-black to-purple-950">
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-500/10 rounded-full mix-blend-screen blur-3xl animate-pulse" />
-        <div className="absolute top-1/2 -right-4 w-96 h-96 bg-blue-500/10 rounded-full mix-blend-screen blur-3xl animate-pulse delay-1000" />
-        <div className="absolute bottom-0 left-1/2 w-80 h-80 bg-pink-500/10 rounded-full mix-blend-screen blur-3xl animate-pulse delay-500" />
-      </div>
-
-      <header className="relative z-10 border-b border-white/10">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="relative">
-                <div className="w-10 h-10 rounded-full overflow-hidden border border-purple-500/30">
-                  <Image
-                    src="/logo.png"
-                    alt="App Logo"
-                    width={40}
-                    height={40}
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-                <div className="absolute -top-1 -right-1">
-                  <Sparkles className="w-4 h-4 text-yellow-400 animate-spin-slow" />
-                </div>
+    <>
+      <div className="min-h-screen">
+        {/* Header */}
+        <header className="sticky top-0 z-20 border-b border-white/10 bg-black/30 backdrop-blur-xl">
+          <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl overflow-hidden border border-white/10 bg-white/5">
+                <Image src="/logo.png" alt="logo" width={40} height={40} />
               </div>
               <div>
-                <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
-                  WeightWise Pro
-                </h1>
-                <p className="text-xs text-gray-400">Cloud Sync Enabled</p>
+                <p className="font-semibold text-white">WeightWise Pro</p>
+                <p className="text-xs text-gray-400">Modern Weight Tracker</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-4">
-              <Badge className="bg-gradient-to-r from-green-500/20 to-green-600/20 text-green-300 border-green-500/30">
-                <Sparkles className="mr-2 h-3 w-3" />
-                Cloud Storage
-              </Badge>
-              <div className="flex items-center gap-3 px-4 py-2 rounded-full bg-gray-800/50 backdrop-blur-sm border border-white/10">
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback className="bg-gradient-to-r from-purple-500 to-blue-500">
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={handleResetAll}
+                className="border-white/10 bg-white/5 hover:bg-white/10 text-gray-200"
+              >
+                <RotateCw className="mr-2 h-4 w-4" />
+                Reset
+              </Button>
+
+              <div className="flex items-center gap-3 px-4 py-2 rounded-2xl bg-white/5 border border-white/10">
+                <Avatar className="h-9 w-9">
+                  <AvatarFallback className="bg-gradient-to-r from-purple-500 to-blue-500 text-white">
                     {userProfile.name.charAt(0)}
                   </AvatarFallback>
                 </Avatar>
-                <div>
-                  <p className="text-sm font-medium">{userProfile.name}</p>
+                <div className="hidden sm:block">
+                  <p className="text-sm font-medium text-white">
+                    {userProfile.name}
+                  </p>
                   <p className="text-xs text-gray-400">
-                    {/* FIXED: Using safeToFixed instead of .toFixed() */}
-                    {stats?.currentWeight !== undefined ? safeToFixed(stats.currentWeight, 1) : "0.0"} kg
+                    {stats?.currentWeight
+                      ? safeToFixed(stats.currentWeight, 1)
+                      : "0.0"}{" "}
+                    kg
                   </p>
                 </div>
               </div>
             </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <main className="relative z-10 container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
+        {/* Main */}
+        <main className="container mx-auto px-4 py-10">
+          {/* Welcome */}
+          <div className="flex flex-col lg:flex-row justify-between gap-6 mb-8">
+            <div>
+              <h1 className="text-4xl font-bold text-white">
+                Welcome back,{" "}
+                <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-blue-400 to-pink-400">
+                  {userProfile.name}
+                </span>
+              </h1>
+              <p className="text-gray-400 mt-2">
+                {format(new Date(), "EEEE, MMMM d, yyyy")}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className="bg-white/5 border-white/10 text-gray-200">
+                <Flame className="w-4 h-4 mr-2 text-orange-400" />
+                {stats?.streak || 1} day streak
+              </Badge>
+
+              {stats?.totalChange !== undefined && (
+                <Badge className="bg-white/5 border-white/10 text-gray-200">
+                  {stats.totalChange < 0 ? (
+                    <TrendingDown className="w-4 h-4 mr-2 text-green-400" />
+                  ) : (
+                    <TrendingUp className="w-4 h-4 mr-2 text-red-400" />
+                  )}
+                  {stats.totalChange < 0 ? "Down" : "Up"}{" "}
+                  {safeToFixed(Math.abs(stats.totalChange), 1)}kg
+                </Badge>
+              )}
+            </div>
+          </div>
+
+          {/* ✅ Motivation Card */}
+          {motivation && (
             <motion.div
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5 }}
+              className="mb-8"
             >
-              <Card className="border-0 bg-gradient-to-br from-gray-800/40 to-gray-900/40 backdrop-blur-xl shadow-2xl">
-                <CardContent className="p-8">
-                  <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+              <Card className="border-white/10 bg-gradient-to-r from-purple-500/10 via-blue-500/10 to-pink-500/10 backdrop-blur-xl shadow-xl overflow-hidden relative">
+                <div className="absolute inset-0 pointer-events-none">
+                  <div className="absolute -top-20 -right-20 w-64 h-64 bg-purple-500/15 rounded-full blur-3xl" />
+                  <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-blue-500/15 rounded-full blur-3xl" />
+                </div>
+
+                <CardContent className="relative z-10 p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                  <div className="flex items-start gap-4">
+                    <div className="p-4 rounded-3xl bg-white/5 border border-white/10 shadow-lg">
+                      <motivation.icon className="w-7 h-7 text-white" />
+                    </div>
                     <div>
-                      <h2 className="text-3xl font-bold mb-2">
-                        Welcome back,{" "}
-                        <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-400">
-                          {userProfile.name}
-                        </span>
-                        !
-                      </h2>
-                      <p className="text-gray-400">
-                        {format(new Date(), "EEEE, MMMM d, yyyy")}
+                      <p className="text-lg font-semibold text-white flex items-center gap-2">
+                        <Quote className="w-4 h-4 text-gray-300" />
+                        {motivation.title}
+                      </p>
+                      <p className="text-sm text-gray-300 mt-1 leading-relaxed">
+                        {motivation.message}
                       </p>
                     </div>
-
-                    <div className="flex items-center gap-4">
-                      <Badge className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 text-purple-300 border-purple-500/30">
-                        <Flame className="mr-2 h-3 w-3" />
-                        {stats?.streak || 1} Day Streak
-                      </Badge>
-                      <Button
-                        variant="outline"
-                        onClick={handleResetData}
-                        className="border-gray-700 text-gray-400 hover:text-white"
-                      >
-                        <RotateCw className="mr-2 h-4 w-4" />
-                        Reset All
-                      </Button>
-                    </div>
                   </div>
+
+                  <Button
+                    variant="outline"
+                    onClick={refreshMotivation}
+                    className="border-white/10 bg-white/5 hover:bg-white/10 text-gray-200 rounded-xl"
+                  >
+                    <RotateCw className="w-4 h-4 mr-2" />
+                    Refresh
+                  </Button>
                 </CardContent>
               </Card>
             </motion.div>
+          )}
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ delay: 0.1 }}
+          {/* Range buttons */}
+          <div className="flex items-center gap-2 mb-6">
+            {(["7d", "30d", "all"] as const).map((r) => (
+              <Button
+                key={r}
+                variant="outline"
+                onClick={() => setRange(r)}
+                className={`border-white/10 bg-white/5 hover:bg-white/10 text-gray-200 rounded-xl ${
+                  range === r ? "ring-2 ring-purple-500/40" : ""
+                }`}
               >
-                <Card className="border-0 bg-gradient-to-br from-purple-500/10 to-purple-600/10 backdrop-blur-xl">
-                  <CardContent className="p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <Scale className="h-8 w-8 text-purple-400" />
-                      <Badge
-                        variant="secondary"
-                        className="bg-purple-500/20 text-purple-300"
-                      >
-                        Current
-                      </Badge>
-                    </div>
-                    <p className="text-3xl font-bold">
-                      {/* FIXED: Using safeToFixed instead of .toFixed() */}
-                      {stats?.currentWeight !== undefined ? safeToFixed(stats.currentWeight, 1) : "0.0"} kg
-                    </p>
-                    <p className="text-sm text-gray-400 mt-2">Today's weight</p>
-                  </CardContent>
-                </Card>
-              </motion.div>
+                {r === "7d"
+                  ? "Last 7 days"
+                  : r === "30d"
+                    ? "Last 30 days"
+                    : "All"}
+              </Button>
+            ))}
+          </div>
 
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ delay: 0.2 }}
-              >
-                <Card className="border-0 bg-gradient-to-br from-blue-500/10 to-blue-600/10 backdrop-blur-xl">
-                  <CardContent className="p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <TrendingUp className="h-8 w-8 text-blue-400" />
-                      <Badge
-                        variant="secondary"
-                        className="bg-blue-500/20 text-blue-300"
-                      >
-                        Change
-                      </Badge>
-                    </div>
-                    <p
-                      className={`text-3xl font-bold ${
-                        stats?.totalChange && stats.totalChange < 0
-                          ? "text-green-400"
-                          : "text-red-400"
-                      }`}
-                    >
-                      {stats?.totalChange && stats.totalChange > 0 ? "+" : ""}
-                      {/* FIXED: Using safeToFixed for totalChange */}
-                      {stats?.totalChange !== undefined ? safeToFixed(stats.totalChange, 1) : "0.0"} kg
-                    </p>
-                    <p className="text-sm text-gray-400 mt-2">Total progress</p>
-                  </CardContent>
-                </Card>
-              </motion.div>
+          {/* Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* LEFT */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Stats */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[
+                  {
+                    label: "Current",
+                    value: `${stats?.currentWeight ? safeToFixed(stats.currentWeight, 1) : "0.0"} kg`,
+                    icon: <Scale className="h-5 w-5" />,
+                  },
+                  {
+                    label: "Total Change",
+                    value: `${stats?.totalChange !== undefined ? safeToFixed(stats.totalChange, 1) : "0.0"} kg`,
+                    icon: <Activity className="h-5 w-5" />,
+                  },
+                  {
+                    label: "Weekly Avg",
+                    value: `${stats?.weeklyAvg !== undefined ? safeToFixed(stats.weeklyAvg, 2) : "0.00"} kg`,
+                    icon: <TrendingUp className="h-5 w-5" />,
+                  },
+                  {
+                    label: "Goal",
+                    value: `${stats?.goalProgress !== undefined ? safeToFixed(stats.goalProgress, 0) : "0"}%`,
+                    icon: <Trophy className="h-5 w-5" />,
+                  },
+                ].map((item, i) => (
+                  <motion.div
+                    key={item.label}
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.1 * i }}
+                  >
+                    <Card className="border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-xl">
+                      <CardContent className="p-5">
+                        <div className="flex items-center justify-between">
+                          <div className="text-white/80">{item.icon}</div>
+                          <Badge className="bg-white/5 border-white/10 text-gray-200 text-xs">
+                            {item.label}
+                          </Badge>
+                        </div>
+                        <p className="text-2xl font-bold text-white mt-4">
+                          {item.value}
+                        </p>
+                        {item.label === "Goal" && (
+                          <div className="mt-3">
+                            <Progress
+                              value={stats?.goalProgress || 0}
+                              className="h-2"
+                            />
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                ))}
+              </div>
 
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ delay: 0.3 }}
-              >
-                <Card className="border-0 bg-gradient-to-br from-green-500/10 to-green-600/10 backdrop-blur-xl">
-                  <CardContent className="p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <Activity className="h-8 w-8 text-green-400" />
-                      <Badge
-                        variant="secondary"
-                        className="bg-green-500/20 text-green-300"
-                      >
-                        Weekly
-                      </Badge>
-                    </div>
-                    <p className="text-3xl font-bold">
-                      {/* FIXED: Using safeToFixed for changePerWeek */}
-                      {stats?.changePerWeek !== undefined ? safeToFixed(stats.changePerWeek, 2) : "0.00"} kg
-                    </p>
-                    <p className="text-sm text-gray-400 mt-2">Per week</p>
-                  </CardContent>
-                </Card>
-              </motion.div>
-
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ delay: 0.4 }}
-              >
-                <Card className="border-0 bg-gradient-to-br from-pink-500/10 to-pink-600/10 backdrop-blur-xl">
-                  <CardContent className="p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <Trophy className="h-8 w-8 text-pink-400" />
-                      <Badge
-                        variant="secondary"
-                        className="bg-pink-500/20 text-pink-300"
-                      >
-                        Goal
-                      </Badge>
-                    </div>
-                    <p className="text-3xl font-bold">
-                      {/* FIXED: Using safeToFixed for goalProgress */}
-                      {stats?.goalProgress !== undefined ? safeToFixed(stats.goalProgress, 0) : "0"}%
-                    </p>
-                    <div className="mt-2">
-                      <Progress value={stats?.goalProgress || 0} className="h-2" />
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            </div>
-
-            <motion.div
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.5 }}
-            >
-              <Card className="border-0 bg-gradient-to-br from-gray-800/40 to-gray-900/40 backdrop-blur-xl shadow-xl">
+              {/* Quick log */}
+              <Card className="border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-gradient-to-r from-purple-500/20 to-blue-500/20">
-                      <Plus className="h-5 w-5 text-purple-400" />
+                    <div className="p-2 rounded-xl bg-white/5 border border-white/10">
+                      <Plus className="h-5 w-5 text-purple-300" />
                     </div>
-                    <span>Log Today's Weight</span>
+                    Quick Log Today
                   </CardTitle>
-                  <CardDescription>
-                    Your data syncs automatically to the cloud
+                  <CardDescription className="text-gray-400">
+                    If today already exists, clicking Save will open edit mode.
                   </CardDescription>
                 </CardHeader>
+
                 <CardContent>
-                  <form onSubmit={handleAddTodaysWeight} className="space-y-6">
+                  <form onSubmit={handleSaveToday} className="space-y-4">
                     <div className="flex flex-col md:flex-row gap-4">
-                      <div className="flex-1">
-                        <div className="relative">
-                          <Input
-                            ref={inputRef}
-                            type="number"
-                            step="0.1"
-                            value={todaysWeight}
-                            onChange={(e) => setTodaysWeight(e.target.value)}
-                            placeholder="Enter today's weight in kg"
-                            className="h-16 text-2xl text-center bg-gray-800/50 border-gray-700 backdrop-blur-sm"
-                            required
-                            min="30"
-                            max="300"
-                          />
-                          <div className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400">
-                            kg
-                          </div>
-                        </div>
+                      <div className="flex-1 relative">
+                        <Input
+                          ref={inputRef}
+                          type="number"
+                          step="0.1"
+                          value={todaysWeight}
+                          onChange={(e) => setTodaysWeight(e.target.value)}
+                          placeholder={
+                            entryToday
+                              ? `Today logged: ${safeToFixed(entryToday.weight, 1)}kg (edit)`
+                              : "Enter today’s weight"
+                          }
+                          className="h-16 text-2xl text-center bg-white/5 border-white/10 backdrop-blur-xl"
+                          required
+                        />
+                        <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
+                          kg
+                        </span>
                       </div>
-                      <motion.div
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
+
+                      <Button
+                        type="submit"
+                        className="h-16 px-8 text-lg bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 border-0 shadow-xl"
                       >
-                        <Button
-                          type="submit"
-                          className="h-16 px-8 text-lg bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 border-0"
-                        >
-                          <Zap className="mr-2 h-5 w-5" />
-                          Save to Cloud
-                        </Button>
-                      </motion.div>
+                        <Zap className="mr-2 h-5 w-5" />
+                        Save
+                      </Button>
                     </div>
                   </form>
                 </CardContent>
               </Card>
-            </motion.div>
 
-            <motion.div
-              initial={{ y: 20, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              transition={{ delay: 0.6 }}
-            >
-              <Card className="border-0 bg-gradient-to-br from-gray-800/40 to-gray-900/40 backdrop-blur-xl shadow-xl">
+              {/* Graph */}
+              <Card className="border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-gradient-to-r from-green-500/20 to-blue-500/20">
-                      <BarChart3 className="h-5 w-5 text-green-400" />
+                    <div className="p-2 rounded-xl bg-white/5 border border-white/10">
+                      <BarChart3 className="h-5 w-5 text-blue-300" />
                     </div>
-                    <span>Progress Visualization</span>
+                    Weight Trend
                   </CardTitle>
-                  <CardDescription>
-                    Your weight journey over time
+                  <CardDescription className="text-gray-400">
+                    Smooth trend curve with goal reference line.
                   </CardDescription>
                 </CardHeader>
+
                 <CardContent>
-                  {weightEntries.length > 1 ? (
-                    <div className="h-[400px]">
+                  {chartData.length > 1 ? (
+                    <div className="h-[420px]">
                       <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={chartData}>
+                        <AreaChart
+                          data={chartData}
+                          margin={{ left: 0, right: 0 }}
+                        >
                           <defs>
                             <linearGradient
-                              id="colorWeight"
+                              id="weightFill"
                               x1="0"
                               y1="0"
                               x2="0"
                               y2="1"
                             >
                               <stop
-                                offset="5%"
+                                offset="0%"
                                 stopColor="#8b5cf6"
-                                stopOpacity={0.8}
+                                stopOpacity={0.45}
                               />
                               <stop
-                                offset="95%"
+                                offset="90%"
                                 stopColor="#8b5cf6"
                                 stopOpacity={0}
                               />
                             </linearGradient>
                           </defs>
+
                           <CartesianGrid
                             strokeDasharray="3 3"
-                            stroke="#374151"
+                            stroke="#ffffff12"
                           />
                           <XAxis
                             dataKey="displayDate"
                             stroke="#9ca3af"
-                            axisLine={false}
                             tickLine={false}
+                            axisLine={false}
                           />
                           <YAxis
                             stroke="#9ca3af"
-                            axisLine={false}
                             tickLine={false}
+                            axisLine={false}
                           />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#1f2937",
-                              border: "1px solid #374151",
-                              borderRadius: "8px",
-                              backdropFilter: "blur(10px)",
-                            }}
-                            formatter={(value) => [`${value} kg`, "Weight"]}
-                            labelFormatter={(label) => `Date: ${label}`}
-                          />
+                          <Tooltip content={<ModernTooltip />} />
+
+                          {userProfile.goal_weight && (
+                            <ReferenceLine
+                              y={userProfile.goal_weight}
+                              stroke="#22c55e"
+                              strokeDasharray="6 6"
+                              strokeWidth={2}
+                              label={{
+                                value: `Goal ${safeToFixed(userProfile.goal_weight, 1)}kg`,
+                                fill: "#22c55e",
+                                position: "insideTopLeft",
+                              }}
+                            />
+                          )}
+
                           <Area
                             type="monotone"
                             dataKey="weight"
                             stroke="#8b5cf6"
                             strokeWidth={3}
-                            fill="url(#colorWeight)"
+                            fill="url(#weightFill)"
+                            dot={{ r: 3 }}
+                            activeDot={{ r: 6 }}
                           />
                         </AreaChart>
                       </ResponsiveContainer>
                     </div>
                   ) : (
-                    <div className="h-[400px] flex flex-col items-center justify-center">
-                      <div className="w-24 h-24 rounded-full bg-gradient-to-r from-purple-500/10 to-blue-500/10 flex items-center justify-center mb-6">
-                        <BarChart3 className="w-12 h-12 text-gray-400" />
+                    <div className="h-[420px] flex flex-col items-center justify-center text-center">
+                      <div className="w-20 h-20 rounded-3xl bg-white/5 border border-white/10 flex items-center justify-center mb-6">
+                        <BarChart3 className="w-10 h-10 text-gray-400" />
                       </div>
-                      <p className="text-lg text-gray-400">
-                        Add more entries to visualize your progress
+                      <p className="text-lg text-gray-300">
+                        Add one more entry to see the trend.
                       </p>
-                      <p className="text-sm text-gray-500 mt-2">
-                        You need at least 2 data points
+                      <p className="text-sm text-gray-500 mt-1">
+                        You need at least 2 data points.
                       </p>
                     </div>
                   )}
                 </CardContent>
               </Card>
-            </motion.div>
-          </div>
+            </div>
 
-          <div className="space-y-6">
-            <motion.div
-              initial={{ x: 20, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ delay: 0.3 }}
-            >
-              <Card className="border-0 bg-gradient-to-br from-gray-800/40 to-gray-900/40 backdrop-blur-xl">
+            {/* RIGHT */}
+            <div className="space-y-6">
+              {/* Profile */}
+              <Card className="border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-gradient-to-r from-cyan-500/20 to-blue-500/20">
-                      <User className="h-5 w-5 text-cyan-400" />
+                    <div className="p-2 rounded-xl bg-white/5 border border-white/10">
+                      <User className="h-5 w-5 text-cyan-300" />
                     </div>
-                    <span>Your Profile</span>
+                    Profile
                   </CardTitle>
+                  <CardDescription className="text-gray-400">
+                    Personal stats and plan.
+                  </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-6">
+
+                <CardContent className="space-y-4">
                   <div className="flex items-center gap-4">
-                    <Avatar className="h-16 w-16">
-                      <AvatarFallback className="text-xl bg-gradient-to-r from-purple-500 to-blue-500">
+                    <Avatar className="h-14 w-14">
+                      <AvatarFallback className="bg-gradient-to-r from-purple-500 to-blue-500 text-white text-lg">
                         {userProfile.name.charAt(0)}
                       </AvatarFallback>
                     </Avatar>
                     <div>
-                      <h3 className="text-xl font-semibold">
+                      <p className="text-lg font-semibold text-white">
                         {userProfile.name}
-                      </h3>
+                      </p>
                       <p className="text-sm text-gray-400">
                         Since{" "}
-                        {format(parseISO(userProfile.start_date), "MMM d, yyyy")}
+                        {format(
+                          parseISO(userProfile.start_date),
+                          "MMM d, yyyy"
+                        )}
                       </p>
                     </div>
                   </div>
 
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
-                      <span className="text-gray-400">Start Weight</span>
-                      <span className="font-semibold">
-                        {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center px-4 py-3 rounded-2xl bg-white/5 border border-white/10">
+                      <span className="text-sm text-gray-400">Start</span>
+                      <span className="font-semibold text-white">
                         {safeToFixed(userProfile.start_weight, 1)} kg
                       </span>
                     </div>
 
                     {userProfile.goal_weight && (
-                      <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
-                        <span className="text-gray-400">Goal Weight</span>
+                      <div className="flex justify-between items-center px-4 py-3 rounded-2xl bg-white/5 border border-white/10">
+                        <span className="text-sm text-gray-400">Goal</span>
                         <span className="font-semibold text-green-400">
-                          {/* FIXED: Using safeToFixed instead of .toFixed() */}
                           {safeToFixed(userProfile.goal_weight, 1)} kg
                         </span>
                       </div>
                     )}
 
                     {userProfile.target_date && (
-                      <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
-                        <span className="text-gray-400">Target Date</span>
-                        <span className="font-semibold">
-                          {format(parseISO(userProfile.target_date), "MMM d, yyyy")}
+                      <div className="flex justify-between items-center px-4 py-3 rounded-2xl bg-white/5 border border-white/10">
+                        <span className="text-sm text-gray-400">
+                          Target Date
+                        </span>
+                        <span className="font-semibold text-white">
+                          {format(
+                            parseISO(userProfile.target_date),
+                            "MMM d, yyyy"
+                          )}
                         </span>
                       </div>
                     )}
 
-                    <div className="flex justify-between items-center p-3 rounded-lg bg-gray-800/30">
-                      <span className="text-gray-400">Total Entries</span>
-                      <span className="font-semibold">
+                    <div className="flex justify-between items-center px-4 py-3 rounded-2xl bg-white/5 border border-white/10">
+                      <span className="text-sm text-gray-400">Entries</span>
+                      <span className="font-semibold text-white">
                         {weightEntries.length}
                       </span>
                     </div>
                   </div>
                 </CardContent>
               </Card>
-            </motion.div>
 
-            <motion.div
-              initial={{ x: 20, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ delay: 0.4 }}
-            >
-              <Card className="border-0 bg-gradient-to-br from-gray-800/40 to-gray-900/40 backdrop-blur-xl">
+              {/* Entries List */}
+              <Card className="border-white/10 bg-white/[0.04] backdrop-blur-xl shadow-xl">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-gradient-to-r from-orange-500/20 to-red-500/20">
-                      <Calendar className="h-5 w-5 text-orange-400" />
+                    <div className="p-2 rounded-xl bg-white/5 border border-white/10">
+                      <Calendar className="h-5 w-5 text-orange-300" />
                     </div>
-                    <span>Recent Entries</span>
+                    Entries
                   </CardTitle>
+                  <CardDescription className="text-gray-400">
+                    Click any entry to edit.
+                  </CardDescription>
                 </CardHeader>
+
                 <CardContent>
                   <div className="space-y-3">
                     <AnimatePresence>
                       {weightEntries.length > 0 ? (
-                        weightEntries.slice(0, 5).map((entry, index) => (
-                          <motion.div
+                        weightEntries.slice(0, 8).map((entry, index) => (
+                          <motion.button
                             key={entry.id}
-                            initial={{ x: -20, opacity: 0 }}
-                            animate={{ x: 0, opacity: 1 }}
-                            transition={{ delay: index * 0.1 }}
-                            className="flex items-center justify-between p-4 rounded-lg bg-gray-800/30 hover:bg-gray-800/50 transition-colors group"
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: index * 0.05 }}
+                            onClick={() => openEditModal(entry)}
+                            className="w-full text-left flex items-center justify-between px-4 py-3 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition"
                           >
                             <div>
-                              <p className="font-semibold text-lg">
-                                {/* FIXED: Using safeToFixed instead of .toFixed() */}
+                              <p className="text-white font-semibold">
                                 {safeToFixed(entry.weight, 1)} kg
                               </p>
-                              <p className="text-sm text-gray-400">
-                                {format(
-                                  parseISO(entry.date),
-                                  "MMM d, h:mm a"
-                                )}
+                              <p className="text-xs text-gray-400">
+                                {format(parseISO(entry.date), "MMM d, yyyy")}
                               </p>
                             </div>
-                            <ChevronRight className="h-4 w-4 text-gray-500 group-hover:text-gray-300 transition-colors" />
-                          </motion.div>
+
+                            <div className="flex items-center gap-2 text-gray-400">
+                              <Pencil className="w-4 h-4" />
+                              <ChevronRight className="w-4 h-4" />
+                            </div>
+                          </motion.button>
                         ))
                       ) : (
-                        <div className="text-center py-8">
-                          <div className="w-16 h-16 rounded-full bg-gray-800/50 flex items-center justify-center mx-auto mb-4">
-                            <Calendar className="w-8 h-8 text-gray-400" />
-                          </div>
-                          <p className="text-gray-400">No entries yet</p>
-                          <p className="text-sm text-gray-500 mt-1">
-                            Start tracking above!
-                          </p>
+                        <div className="text-center py-10 text-gray-400">
+                          No entries yet — start tracking today!
                         </div>
                       )}
                     </AnimatePresence>
                   </div>
-
-                  {weightEntries.length > 5 && (
-                    <div className="mt-6 pt-4 border-t border-gray-800">
-                      <Button
-                        variant="ghost"
-                        className="w-full text-gray-400 hover:text-white"
-                        onClick={() => {
-                          toast.info("All entries view coming soon!");
-                        }}
-                      >
-                        View All {weightEntries.length} Entries
-                        <ChevronRight className="ml-2 h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
                 </CardContent>
               </Card>
-            </motion.div>
 
-            <motion.div
-              initial={{ x: 20, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ delay: 0.5 }}
-            >
-              <Card className="border-0 bg-gradient-to-br from-green-500/10 to-green-600/10 backdrop-blur-xl">
+              {/* Footer card */}
+              <Card className="border-white/10 bg-gradient-to-r from-green-500/10 to-emerald-500/10 backdrop-blur-xl shadow-xl">
                 <CardContent className="p-6">
                   <div className="flex items-start gap-4">
-                    <div className="p-3 rounded-full bg-green-500/20">
-                      <Zap className="h-6 w-6 text-green-400" />
+                    <div className="p-3 rounded-2xl bg-white/5 border border-white/10">
+                      <Zap className="h-6 w-6 text-green-300" />
                     </div>
                     <div>
-                      <h4 className="font-semibold mb-2">Cloud Storage Active</h4>
-                      <p className="text-sm text-gray-300">
-                        Your data is securely backed up in Neon PostgreSQL. You can access it from any device!
+                      <h4 className="font-semibold text-white">
+                        Cloud Sync Active
+                      </h4>
+                      <p className="text-sm text-gray-300 mt-1">
+                        Your entries are safe inside Neon PostgreSQL.
                       </p>
                     </div>
                   </div>
                 </CardContent>
               </Card>
-            </motion.div>
+            </div>
           </div>
-        </div>
-      </main>
-    </div>
+        </main>
+      </div>
+
+      {/* ==================== EDIT MODAL ==================== */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="bg-gray-950/95 border-white/10 backdrop-blur-xl rounded-3xl max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-purple-300" />
+              Edit Entry
+            </DialogTitle>
+            <DialogDescription className="text-gray-400">
+              Change weight, note or date.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5 mt-4">
+            <div>
+              <Label className="text-gray-300 mb-2 block">Weight (kg)</Label>
+              <Input
+                value={editWeight}
+                onChange={(e) => setEditWeight(e.target.value)}
+                type="number"
+                step="0.1"
+                className="h-12 bg-white/5 border-white/10 text-white"
+              />
+            </div>
+
+            <div>
+              <Label className="text-gray-300 mb-2 block">Date</Label>
+              <Input
+                value={editDate}
+                onChange={(e) => setEditDate(e.target.value)}
+                type="date"
+                className="h-12 bg-white/5 border-white/10 text-white"
+              />
+            </div>
+
+            <div>
+              <Label className="text-gray-300 mb-2 block">Note</Label>
+              <Textarea
+                value={editNote}
+                onChange={(e) => setEditNote(e.target.value)}
+                placeholder="Optional note…"
+                className="bg-white/5 border-white/10 text-white min-h-[90px]"
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="mt-6 flex justify-between sm:justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteConfirmOpen(true)}
+              className="border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              Delete
+            </Button>
+
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setEditOpen(false)}
+                className="border-white/10 bg-white/5 hover:bg-white/10 text-gray-200"
+              >
+                Cancel
+              </Button>
+
+              <Button
+                onClick={handleSaveEdit}
+                disabled={isSavingEdit}
+                className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 shadow-xl"
+              >
+                {isSavingEdit ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4 mr-2" />
+                    Save Changes
+                  </>
+                )}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ==================== DELETE CONFIRM ==================== */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent className="bg-gray-950/95 border-white/10 backdrop-blur-xl rounded-3xl max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white">Delete Entry?</DialogTitle>
+            <DialogDescription className="text-gray-400">
+              This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogFooter className="mt-6 flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteConfirmOpen(false)}
+              className="border-white/10 bg-white/5 hover:bg-white/10 text-gray-200"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleDeleteEntry}
+              disabled={isDeleting}
+              className="bg-red-600 hover:bg-red-700 text-white shadow-xl"
+            >
+              {isDeleting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  Deleting…
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-4 h-4 mr-2" />
+                  Delete
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
